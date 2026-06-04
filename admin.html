@@ -23,7 +23,10 @@
   const db = getDatabase(app);
 
   let parsedMeet = null;
+  let allResults = {};
+  let heatSheetData = {};
 
+  // ── Heat Sheet Upload ─────────────────────────────────────────────────────
   window.handleFile = function(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -45,8 +48,6 @@
   };
 
   function parseHeatSheet(rows) {
-    // Expected columns: Event, Heat, Lane, LastName, FirstName, Team, Seed
-    // First row = headers
     const headers = rows[0].map(h => String(h).trim().toLowerCase());
     const eventIdx = headers.findIndex(h => h.includes('event'));
     const heatIdx  = headers.findIndex(h => h.includes('heat'));
@@ -67,7 +68,7 @@
       const evNum = String(r[eventIdx]).trim();
       const htNum = String(r[heatIdx]).trim();
       const lnNum = String(r[laneIdx]).trim();
-      if (!evNum || !htNum || !lnNum || evNum === '' || isNaN(evNum)) continue;
+      if (!evNum || !htNum || !lnNum || isNaN(evNum)) continue;
 
       let name = '';
       if (lastIdx !== -1 && firstIdx !== -1) {
@@ -116,7 +117,6 @@
       await set(ref(db, 'activeEvent'), Object.keys(parsedMeet).sort((a,b)=>Number(a)-Number(b))[0]);
       showStatus('✓ Heat sheet uploaded successfully! Timers can now connect.', 'success');
       btn.textContent = 'Upload Complete ✓';
-      loadCurrentState();
     } catch(err) {
       showStatus('Upload failed: ' + err.message, 'error');
       btn.disabled = false;
@@ -124,6 +124,7 @@
     }
   };
 
+  // ── Event Control ─────────────────────────────────────────────────────────
   window.setActiveEvent = async function() {
     const ev = document.getElementById('active-event-select').value;
     if (!ev) return;
@@ -137,30 +138,185 @@
     showStatus('Results cleared.', 'info');
   };
 
+  // ── Results Editor ────────────────────────────────────────────────────────
+  function renderResultsEditor(results) {
+    allResults = results || {};
+    const container = document.getElementById('results-editor');
+    const filterEv = document.getElementById('filter-event').value;
+    const filterHt = document.getElementById('filter-heat').value;
+
+    // Build flat list of all entries
+    let rows = [];
+    for (const ev in allResults) {
+      for (const ht in allResults[ev]) {
+        for (const laneKey in allResults[ev][ht]) {
+          const entry = allResults[ev][ht][laneKey];
+          // laneKey may be "3" (official avg) or "3_A", "3_B", etc. (individual timer)
+          rows.push({ ev, ht, laneKey, entry });
+        }
+      }
+    }
+
+    // Apply filters
+    if (filterEv) rows = rows.filter(r => r.ev === filterEv);
+    if (filterHt) rows = rows.filter(r => r.ht === filterHt);
+
+    // Sort
+    rows.sort((a, b) => {
+      if (a.ev !== b.ev) return Number(a.ev) - Number(b.ev);
+      if (a.ht !== b.ht) return Number(a.ht) - Number(b.ht);
+      return String(a.laneKey).localeCompare(String(b.laneKey));
+    });
+
+    if (rows.length === 0) {
+      container.innerHTML = '<p style="color:#4a7aaa;padding:16px;">No results yet — or none match the filter.</p>';
+      return;
+    }
+
+    let html = `<table>
+      <thead><tr>
+        <th>Event</th><th>Heat</th><th>Lane</th><th>Timer</th><th>Swimmer</th><th>Time</th><th>Actions</th>
+      </tr></thead><tbody>`;
+
+    for (const { ev, ht, laneKey, entry } of rows) {
+      const isAvg = laneKey === entry.lane + '_avg' || (!laneKey.includes('_') && entry.averaged);
+      const rowClass = isAvg ? 'avg-row' : '';
+      const timerLabel = laneKey.includes('_') ? laneKey.split('_')[1] : (entry.averaged ? 'AVG' : entry.timerName || '—');
+      html += `<tr class="${rowClass}">
+        <td>Ev ${ev}</td>
+        <td>Ht ${ht}</td>
+        <td>Ln ${entry.lane || laneKey}</td>
+        <td><span class="timer-badge">${timerLabel}</span></td>
+        <td>${entry.swimmer || '—'}</td>
+        <td class="time-val">${entry.timeFormatted || '—'}</td>
+        <td class="action-btns">
+          <button class="btn-edit" onclick="openEditModal('${ev}','${ht}','${laneKey}')">✏️ Edit</button>
+          <button class="btn-del" onclick="deleteEntry('${ev}','${ht}','${laneKey}')">🗑 Delete</button>
+        </td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }
+
+  window.openEditModal = function(ev, ht, laneKey) {
+    const entry = allResults[ev]?.[ht]?.[laneKey];
+    if (!entry) return;
+    document.getElementById('modal-title').textContent = `Edit — Ev ${ev} · Ht ${ht} · ${laneKey}`;
+    document.getElementById('modal-swimmer').textContent = entry.swimmer || '—';
+    document.getElementById('edit-time-input').value = entry.timeFormatted || '';
+    document.getElementById('edit-modal').style.display = 'flex';
+    document.getElementById('edit-modal').dataset.ev = ev;
+    document.getElementById('edit-modal').dataset.ht = ht;
+    document.getElementById('edit-modal').dataset.laneKey = laneKey;
+  };
+
+  window.closeModal = function() {
+    document.getElementById('edit-modal').style.display = 'none';
+  };
+
+  window.saveEdit = async function() {
+    const modal = document.getElementById('edit-modal');
+    const ev = modal.dataset.ev;
+    const ht = modal.dataset.ht;
+    const laneKey = modal.dataset.laneKey;
+    const rawTime = document.getElementById('edit-time-input').value.trim();
+
+    // Parse m:ss.hh
+    const match = rawTime.match(/^(\d+):(\d{2})\.(\d{2})$/);
+    if (!match) {
+      document.getElementById('edit-error').textContent = 'Format must be m:ss.hh — e.g. 1:02.34';
+      return;
+    }
+    document.getElementById('edit-error').textContent = '';
+    const ms = (parseInt(match[1]) * 60000) + (parseInt(match[2]) * 1000) + (parseInt(match[3]) * 10);
+
+    const entry = { ...allResults[ev][ht][laneKey], time: ms, timeFormatted: rawTime, editedByAdmin: true };
+    await set(ref(db, `results/${ev}/${ht}/${laneKey}`), entry);
+
+    // If this is an individual timer entry, recalculate the average
+    if (laneKey.includes('_')) {
+      await recalcAverage(ev, ht, laneKey.split('_')[0]);
+    }
+
+    closeModal();
+    showStatus(`✓ Time updated to ${rawTime}`, 'success');
+  };
+
+  window.deleteEntry = async function(ev, ht, laneKey) {
+    const entry = allResults[ev]?.[ht]?.[laneKey];
+    const label = entry?.swimmer || laneKey;
+    if (!confirm(`Delete time for ${label} (${entry?.timeFormatted || '?'})?\nThis cannot be undone.`)) return;
+    await remove(ref(db, `results/${ev}/${ht}/${laneKey}`));
+
+    // If individual timer, recalc average
+    if (laneKey.includes('_')) {
+      await recalcAverage(ev, ht, laneKey.split('_')[0]);
+    }
+    showStatus(`✓ Entry deleted.`, 'info');
+  };
+
+  async function recalcAverage(ev, ht, lane) {
+    const snap = await get(ref(db, `results/${ev}/${ht}`));
+    const heatData = snap.val() || {};
+    const timerEntries = Object.entries(heatData).filter(([k]) => k.startsWith(lane + '_'));
+    if (timerEntries.length >= 2) {
+      const times = timerEntries.map(([, e]) => e.time);
+      const avg = Math.round(times.reduce((a, b) => a + b, 0) / times.length);
+      const avgFormatted = formatTime(avg);
+      const sample = timerEntries[0][1];
+      await set(ref(db, `results/${ev}/${ht}/${lane}`), {
+        time: avg, timeFormatted: avgFormatted,
+        swimmer: sample.swimmer, team: sample.team, seed: sample.seed,
+        lane, event: ev, heat: ht, averaged: true,
+        timerCount: timerEntries.length
+      });
+    } else {
+      // Not enough timers left — remove the average entry
+      await remove(ref(db, `results/${ev}/${ht}/${lane}`));
+    }
+  }
+
+  function formatTime(ms) {
+    const totalMs = Math.round(ms);
+    const mins = Math.floor(totalMs / 60000);
+    const secs = Math.floor((totalMs % 60000) / 1000);
+    const hundredths = Math.floor((totalMs % 1000) / 10);
+    return `${mins}:${String(secs).padStart(2,'0')}.${String(hundredths).padStart(2,'0')}`;
+  }
+
+  // ── Filter controls ───────────────────────────────────────────────────────
+  window.applyFilter = function() { renderResultsEditor(allResults); };
+
+  // ── Live subscriptions ────────────────────────────────────────────────────
   function loadCurrentState() {
     onValue(ref(db, 'heatSheet'), snap => {
-      const data = snap.val();
-      if (!data) return;
-      const events = Object.keys(data).sort((a,b)=>Number(a)-Number(b));
+      heatSheetData = snap.val() || {};
+      const events = Object.keys(heatSheetData).sort((a,b)=>Number(a)-Number(b));
       const sel = document.getElementById('active-event-select');
+      const fev = document.getElementById('filter-event');
       sel.innerHTML = events.map(e => `<option value="${e}">Event ${e}</option>`).join('');
-      document.getElementById('event-controls').style.display = 'block';
-    }, { onlyOnce: true });
+      fev.innerHTML = '<option value="">All Events</option>' + events.map(e => `<option value="${e}">Event ${e}</option>`).join('');
+      if (events.length) document.getElementById('event-controls').style.display = 'block';
+    });
 
     onValue(ref(db, 'activeEvent'), snap => {
       const ev = snap.val();
       if (ev) {
-        const sel = document.getElementById('active-event-select');
-        sel.value = ev;
+        document.getElementById('active-event-select').value = ev;
         document.getElementById('current-active').textContent = 'Currently active: Event ' + ev;
       }
     });
 
     onValue(ref(db, 'results'), snap => {
       const data = snap.val() || {};
+      // Count official results only (no _A/_B/_C keys)
       let count = 0;
-      for (const ev in data) for (const ht in data[ev]) for (const ln in data[ev][ht]) count++;
-      document.getElementById('result-count').textContent = count + ' times recorded';
+      for (const ev in data) for (const ht in data[ev]) for (const ln in data[ev][ht]) {
+        if (!String(ln).includes('_')) count++;
+      }
+      document.getElementById('result-count').textContent = count + ' official times';
+      renderResultsEditor(data);
     });
   }
 
@@ -169,6 +325,7 @@
     el.textContent = msg;
     el.className = 'status ' + type;
     el.style.display = 'block';
+    setTimeout(() => el.style.display = 'none', 4000);
   }
 
   document.addEventListener('DOMContentLoaded', loadCurrentState);
@@ -179,33 +336,21 @@
 
   header {
     background: linear-gradient(135deg, #0066cc, #003380);
-    padding: 24px 32px;
-    display: flex; align-items: center; gap: 16px;
+    padding: 24px 32px; display: flex; align-items: center; gap: 16px;
     border-bottom: 2px solid #0088ff;
   }
   header .logo { font-size: 2rem; }
   header h1 { font-size: 1.6rem; font-weight: 700; color: #fff; }
   header p { font-size: 0.9rem; color: #99ccff; margin-top: 2px; }
 
-  main { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
 
-  .card {
-    background: #111827;
-    border: 1px solid #1e3a5f;
-    border-radius: 12px;
-    padding: 24px;
-    margin-bottom: 24px;
-  }
+  .card { background: #111827; border: 1px solid #1e3a5f; border-radius: 12px; padding: 24px; margin-bottom: 24px; }
   .card h2 { font-size: 1.1rem; color: #60a5fa; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
 
   .upload-zone {
-    border: 2px dashed #1e3a5f;
-    border-radius: 10px;
-    padding: 40px;
-    text-align: center;
-    cursor: pointer;
-    transition: all 0.2s;
-    position: relative;
+    border: 2px dashed #1e3a5f; border-radius: 10px; padding: 40px;
+    text-align: center; cursor: pointer; transition: all 0.2s; position: relative;
   }
   .upload-zone:hover { border-color: #0088ff; background: #0a1628; }
   .upload-zone input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
@@ -213,39 +358,29 @@
   .upload-zone p { color: #7090b0; font-size: 0.95rem; }
   .upload-zone strong { color: #60a5fa; }
 
-  .btn {
-    display: inline-block; padding: 12px 28px; border-radius: 8px;
-    font-size: 1rem; font-weight: 600; cursor: pointer; border: none;
-    transition: all 0.2s;
-  }
+  .btn { display: inline-block; padding: 12px 28px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; border: none; transition: all 0.2s; }
   .btn-primary { background: linear-gradient(135deg, #0066cc, #0044aa); color: #fff; }
   .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, #0077ee, #0055cc); transform: translateY(-1px); }
   .btn-danger { background: linear-gradient(135deg, #cc2200, #991100); color: #fff; }
   .btn-danger:hover { background: linear-gradient(135deg, #ee3311, #bb2200); }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
-  .status {
-    display: none; padding: 12px 16px; border-radius: 8px;
-    margin-bottom: 20px; font-weight: 500;
-  }
+  .status { display: none; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-weight: 500; }
   .status.success { background: #0d3320; border: 1px solid #2d8a50; color: #4ade80; }
   .status.error   { background: #330d0d; border: 1px solid #8a2d2d; color: #f87171; }
   .status.info    { background: #0d1f33; border: 1px solid #2d5a8a; color: #60a5fa; }
 
   .controls-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
-  select {
-    background: #1a2540; border: 1px solid #2d4a7a; color: #e0e8ff;
-    padding: 10px 14px; border-radius: 8px; font-size: 0.95rem; cursor: pointer;
-  }
+  select { background: #1a2540; border: 1px solid #2d4a7a; color: #e0e8ff; padding: 10px 14px; border-radius: 8px; font-size: 0.95rem; cursor: pointer; }
 
   #event-controls { display: none; }
   #preview-section { display: none; }
   #preview { max-height: 400px; overflow-y: auto; margin-top: 16px; }
 
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  thead { position: sticky; top: 0; background: #0a1628; }
+  thead { position: sticky; top: 0; background: #0a1628; z-index: 1; }
   th { padding: 10px 12px; text-align: left; color: #60a5fa; border-bottom: 1px solid #1e3a5f; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  td { padding: 8px 12px; border-bottom: 1px solid #111827; }
+  td { padding: 9px 12px; border-bottom: 1px solid #0d1a2e; vertical-align: middle; }
   tr:hover td { background: #0d1f33; }
 
   .stat-row { display: flex; gap: 16px; flex-wrap: wrap; }
@@ -255,6 +390,49 @@
 
   .csv-hint { background: #0a1628; border-left: 3px solid #0066cc; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.85rem; color: #7090b0; margin-top: 12px; }
   .csv-hint code { background: #1a2540; padding: 2px 6px; border-radius: 4px; color: #93c5fd; font-family: monospace; }
+
+  /* Results editor */
+  .filter-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .filter-row label { font-size: 0.8rem; color: #4a7aaa; }
+
+  .avg-row td { background: #0a1e18 !important; }
+  .avg-row .time-val { color: #4ade80; font-weight: 700; }
+
+  .timer-badge { background: #0a2050; border: 1px solid #1a4080; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; color: #60a5fa; font-weight: 600; }
+  .avg-row .timer-badge { background: #0a2818; border-color: #1a5030; color: #4ade80; }
+
+  .action-btns { display: flex; gap: 6px; }
+  .btn-edit { background: #0a2050; border: 1px solid #1a4080; color: #60a5fa; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
+  .btn-edit:hover { background: #0d2d70; }
+  .btn-del  { background: #2a0d0d; border: 1px solid #6a2020; color: #f87171; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
+  .btn-del:hover { background: #3d1010; }
+
+  #results-editor { max-height: 500px; overflow-y: auto; }
+
+  /* Edit modal */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,5,15,0.88);
+    align-items: center; justify-content: center; z-index: 200;
+  }
+  .modal-box {
+    background: #0d1b2e; border: 1px solid #1a3a6a; border-radius: 16px;
+    padding: 28px; width: 90%; max-width: 380px;
+  }
+  .modal-box h3 { color: #60a5fa; font-size: 1rem; margin-bottom: 4px; }
+  .modal-swimmer { font-size: 1.2rem; font-weight: 700; color: #fff; margin-bottom: 20px; }
+  .modal-box label { font-size: 0.8rem; color: #4a7aaa; text-transform: uppercase; letter-spacing: 0.08em; display: block; margin-bottom: 6px; }
+  .modal-box input {
+    width: 100%; padding: 12px 14px; background: #0a1628; border: 1px solid #1e3a5f;
+    border-radius: 8px; color: #e0e8ff; font-size: 1.3rem; font-family: monospace;
+    text-align: center; letter-spacing: 0.05em;
+  }
+  .modal-box input:focus { outline: none; border-color: #0088ff; }
+  .modal-error { color: #f87171; font-size: 0.8rem; margin-top: 6px; min-height: 16px; }
+  .modal-btns { display: flex; gap: 10px; margin-top: 20px; }
+  .modal-btn { flex: 1; padding: 12px; border-radius: 8px; border: none; font-size: 0.95rem; font-weight: 700; cursor: pointer; transition: all 0.2s; }
+  .modal-btn.save { background: linear-gradient(135deg, #0066cc, #0044aa); color: #fff; }
+  .modal-btn.cancel { background: #1a2540; color: #7090b0; }
+  .modal-btn:hover { opacity: 0.9; }
 </style>
 </head>
 <body>
@@ -271,24 +449,8 @@
   <div class="card">
     <h2>📊 Meet Status</h2>
     <div class="stat-row">
-      <div class="stat"><div class="stat-label">Results Recorded</div><div class="stat-value" id="result-count">—</div></div>
+      <div class="stat"><div class="stat-label">Official Times</div><div class="stat-value" id="result-count">—</div></div>
       <div class="stat"><div class="stat-label">Active Event</div><div class="stat-value" id="current-active">—</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>📁 Upload Heat Sheet</h2>
-    <div class="upload-zone">
-      <input type="file" accept=".xlsx,.xls,.csv" onchange="handleFile(event)">
-      <div class="icon">📋</div>
-      <p><strong>Click to select your heat sheet</strong></p>
-      <p>.xlsx or .csv — first row must be headers</p>
-    </div>
-    <div class="csv-hint">
-      Required columns: <code>Event</code> <code>Heat</code> <code>Lane</code> <code>FirstName</code> <code>LastName</code> (or <code>Name</code>) — and optionally <code>Team</code> <code>Seed</code>
-    </div>
-    <div style="margin-top:16px;">
-      <button class="btn btn-primary" id="upload-btn" onclick="uploadMeet()" disabled>Upload to Firebase</button>
     </div>
   </div>
 
@@ -302,10 +464,56 @@
     </div>
   </div>
 
+  <div class="card">
+    <h2>✏️ Edit / Delete Results</h2>
+    <div class="filter-row">
+      <label>Filter:</label>
+      <select id="filter-event" onchange="applyFilter()"><option value="">All Events</option></select>
+      <select id="filter-heat" onchange="applyFilter()">
+        <option value="">All Heats</option>
+        <option value="1">Heat 1</option><option value="2">Heat 2</option>
+        <option value="3">Heat 3</option><option value="4">Heat 4</option>
+        <option value="5">Heat 5</option><option value="6">Heat 6</option>
+      </select>
+    </div>
+    <div id="results-editor"><p style="color:#4a7aaa;padding:16px;">No results yet.</p></div>
+  </div>
+
+  <div class="card">
+    <h2>📁 Upload Heat Sheet</h2>
+    <div class="upload-zone">
+      <input type="file" accept=".xlsx,.xls,.csv" onchange="handleFile(event)">
+      <div class="icon">📋</div>
+      <p><strong>Click to select your heat sheet</strong></p>
+      <p>.xlsx or .csv — first row must be headers</p>
+    </div>
+    <div class="csv-hint">
+      Required columns: <code>Event</code> <code>Heat</code> <code>Lane</code> <code>FirstName</code> <code>LastName</code> (or <code>Name</code>) — optionally <code>Team</code> <code>Seed</code>
+    </div>
+    <div style="margin-top:16px;">
+      <button class="btn btn-primary" id="upload-btn" onclick="uploadMeet()" disabled>Upload to Firebase</button>
+    </div>
+  </div>
+
   <div class="card" id="preview-section">
     <h2>👁 Preview</h2>
     <div id="preview"></div>
   </div>
 </main>
+
+<!-- Edit Modal -->
+<div class="modal-overlay" id="edit-modal">
+  <div class="modal-box">
+    <h3 id="modal-title">Edit Time</h3>
+    <div class="modal-swimmer" id="modal-swimmer"></div>
+    <label>Time (m:ss.hh)</label>
+    <input type="text" id="edit-time-input" placeholder="1:02.34" maxlength="8">
+    <div class="modal-error" id="edit-error"></div>
+    <div class="modal-btns">
+      <button class="modal-btn cancel" onclick="closeModal()">Cancel</button>
+      <button class="modal-btn save" onclick="saveEdit()">Save</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

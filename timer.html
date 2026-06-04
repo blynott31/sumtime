@@ -23,6 +23,7 @@
 
   let timerName = '';
   let myLane = null;
+  let mySlot = 'A'; // A, B, or C — which timer position this person is
   let activeEvent = null;
   let activeHeat = null;
   let heatSheet = null;
@@ -38,12 +39,15 @@
   window.doLogin = function() {
     const name = document.getElementById('login-name').value.trim();
     const lane = document.getElementById('login-lane').value;
+    const slot = document.getElementById('login-slot').value;
     if (!name) { shake('login-name'); return; }
     if (!lane)  { shake('login-lane'); return; }
     timerName = name;
     myLane = lane;
+    mySlot = slot;
     localStorage.setItem('swimTimer_name', name);
     localStorage.setItem('swimTimer_lane', lane);
+    localStorage.setItem('swimTimer_slot', slot);
     showScreen('main-screen');
     subscribeToMeet();
   };
@@ -90,7 +94,7 @@
     const seedEl = document.getElementById('swimmer-seed');
     const laneEl = document.getElementById('lane-badge');
 
-    laneEl.textContent = 'Lane ' + myLane;
+    laneEl.textContent = 'Lane ' + myLane + ' · Timer ' + mySlot;
 
     if (!heatSheet || !activeEvent || !activeHeat) {
       nameEl.textContent = 'Waiting for heat…';
@@ -186,6 +190,8 @@
       return;
     }
     const swimmerInfo = heatSheet?.[activeEvent]?.heats?.[activeHeat]?.lanes?.[myLane];
+    const slotKey = `${myLane}_${mySlot}`; // e.g. "3_A"
+
     const entry = {
       time: elapsed,
       timeFormatted: formatTime(elapsed),
@@ -193,6 +199,7 @@
       team: swimmerInfo?.team || '',
       seed: swimmerInfo?.seed || '',
       lane: myLane,
+      slot: mySlot,
       event: activeEvent,
       heat: activeHeat,
       timerName: timerName,
@@ -205,14 +212,44 @@
     btn.textContent = 'Submitting…';
 
     try {
-      await set(ref(db, `results/${activeEvent}/${activeHeat}/${myLane}`), entry);
+      // Save individual timer result under e.g. results/15/2/3_A
+      await set(ref(db, `results/${activeEvent}/${activeHeat}/${slotKey}`), entry);
+
+      // Now check how many timer entries exist for this lane and calculate average
+      const heatSnap = await get(ref(db, `results/${activeEvent}/${activeHeat}`));
+      const heatData = heatSnap.val() || {};
+      const timerEntries = Object.entries(heatData)
+        .filter(([k]) => k.startsWith(myLane + '_') && /^[0-9]+_[ABC]$/.test(k));
+
+      if (timerEntries.length >= 2) {
+        const times = timerEntries.map(([, e]) => e.time);
+        const avg = Math.round(times.reduce((a, b) => a + b, 0) / times.length);
+        const avgFormatted = formatTime(avg);
+        // Write official averaged result under the plain lane key e.g. results/15/2/3
+        await set(ref(db, `results/${activeEvent}/${activeHeat}/${myLane}`), {
+          time: avg,
+          timeFormatted: avgFormatted,
+          swimmer: entry.swimmer,
+          team: entry.team,
+          seed: entry.seed,
+          lane: myLane,
+          event: activeEvent,
+          heat: activeHeat,
+          averaged: true,
+          timerCount: timerEntries.length,
+          individualTimes: timerEntries.map(([k, e]) => `${k.split('_')[1]}: ${e.timeFormatted}`).join(', ')
+        });
+        showToast(`✓ ${timerEntries.length} timers · Avg: ${avgFormatted}`);
+      } else {
+        showToast('✓ Time recorded — waiting for other timers…');
+      }
+
       submittedThisHeat = true;
       document.getElementById('submit-section').style.display = 'none';
-      showToast('✓ Time submitted: ' + formatTime(elapsed));
       confetti();
     } catch(err) {
       btn.disabled = false;
-      btn.textContent = 'Confirm Submit';
+      btn.textContent = '✓ Submit';
       alert('Submit failed: ' + err.message);
     }
   };
@@ -262,8 +299,10 @@
   document.addEventListener('DOMContentLoaded', () => {
     const savedName = localStorage.getItem('swimTimer_name');
     const savedLane = localStorage.getItem('swimTimer_lane');
+    const savedSlot = localStorage.getItem('swimTimer_slot');
     if (savedName) document.getElementById('login-name').value = savedName;
     if (savedLane) document.getElementById('login-lane').value = savedLane;
+    if (savedSlot) document.getElementById('login-slot').value = savedSlot;
     showScreen('login-screen');
     // wake lock to prevent screen sleep
     if ('wakeLock' in navigator) {
@@ -447,9 +486,16 @@
         <option value="6">Lane 6</option>
         <option value="7">Lane 7</option>
         <option value="8">Lane 8</option>
-        <option value="9">Lane 9</option>
-        <option value="10">Lane 10</option>
       </select>
+    </div>
+    <div class="field">
+      <label>Timer Position</label>
+      <select id="login-slot">
+        <option value="A">Timer A (primary)</option>
+        <option value="B">Timer B (backup)</option>
+        <option value="C">Timer C (backup)</option>
+      </select>
+      <div style="font-size:0.75rem;color:#4a7aaa;margin-top:6px;">Each lane should have 2–3 timers. Average posts automatically once 2 are submitted.</div>
     </div>
     <button class="btn-login" onclick="doLogin()">Enter Meet →</button>
   </div>

@@ -113,6 +113,7 @@
         <td class="time-cell">${t.timeFormatted}</td>
         <td class="heat-cell">
           Heat ${t.heat}
+          ${t.averaged ? `<span class="avg-badge" title="${t.individualTimes || ''}">AVG ×${t.timerCount||2}</span>` : ''}
           ${isHeatWinner ? '<span class="heat-win-badge">HEAT WIN</span>' : ''}
         </td>
       </tr>`;
@@ -306,6 +307,11 @@
     color: #60a5fa; text-align: right; white-space: nowrap;
   }
   .heat-cell { font-size: 0.9rem; color: #4a7aaa; text-align: right; white-space: nowrap; }
+  .avg-badge {
+    display: inline-block; background: #0d1f33; border: 1px solid #1a4060;
+    color: #60a5fa; font-size: 0.7rem; font-weight: 700; padding: 2px 8px;
+    border-radius: 4px; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.06em;
+  }
   .heat-win-badge {
     display: inline-block; background: #0d3320; border: 1px solid #2d8a50;
     color: #4ade80; font-size: 0.7rem; font-weight: 700; padding: 2px 8px;

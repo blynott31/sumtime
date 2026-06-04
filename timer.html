@@ -142,8 +142,19 @@
     document.getElementById('timer-display').classList.add('stopped');
     setTimeout(() => document.getElementById('timer-display').classList.remove('stopped'), 600);
     if (!submittedThisHeat) {
-      document.getElementById('submit-section').style.display = 'block';
+      // Populate overlay with swimmer info
+      const swimmerName = document.getElementById('swimmer-name')?.textContent || '';
+      document.getElementById('submit-swimmer-name').textContent = swimmerName;
+      const evBadge = document.getElementById('event-badge')?.textContent || '';
+      const heatVal = document.getElementById('heat-select')?.value || '?';
+      const laneBadge = document.getElementById('lane-badge')?.textContent || '';
+      document.getElementById('submit-meta').textContent = `${evBadge} · Heat ${heatVal} · ${laneBadge}`;
       document.getElementById('final-time').textContent = formatTime(elapsed);
+      // Always reset button state before showing
+      const btn = document.getElementById('confirm-submit-btn');
+      btn.disabled = false;
+      btn.textContent = '✓ Submit';
+      document.getElementById('submit-section').style.display = 'flex';
     }
   };
 
@@ -500,42 +511,6 @@
 
 <div id="toast"></div>
 
-<script>
-  // Update submit card with swimmer info before showing
-  const origStop = window.stopTimer;
-  // patch submit section to populate swimmer info
-  document.addEventListener('DOMContentLoaded', () => {
-    const origSubmitSection = document.getElementById('submit-section');
-    // override showSubmit content
-  });
-</script>
-<script type="module">
-  // Patch stopTimer to fill swimmer name in submit overlay
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  // (State is already in the main module above — this script block just patches the overlay UI)
-  // We use a global event instead
-</script>
-<script>
-  // Intercept stop to fill overlay
-  const _origStop = window.stopTimer;
-  window.stopTimer = function() {
-    _origStop && _origStop();
-    // Fill submit card
-    const nameEl = document.getElementById('swimmer-name');
-    const subName = document.getElementById('submit-swimmer-name');
-    if (subName && nameEl) subName.textContent = nameEl.textContent;
-    const metaEl = document.getElementById('submit-meta');
-    const evBadge = document.getElementById('event-badge');
-    const ht = document.getElementById('heat-select');
-    const ln = document.getElementById('lane-badge');
-    if (metaEl) metaEl.textContent = (evBadge?.textContent||'') + ' · Heat ' + (ht?.value||'?') + ' · ' + (ln?.textContent||'');
-    // Show as flex
-    const sub = document.getElementById('submit-section');
-    if (sub) { sub.style.display = 'flex'; }
-    const btn = document.getElementById('confirm-submit-btn');
-    if (btn) { btn.disabled = false; btn.textContent = '✓ Submit'; }
-  };
-</script>
 
 </body>
 </html>

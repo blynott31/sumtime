@@ -304,10 +304,23 @@
     if (savedLane) document.getElementById('login-lane').value = savedLane;
     if (savedSlot) document.getElementById('login-slot').value = savedSlot;
     showScreen('login-screen');
-    // wake lock to prevent screen sleep
-    if ('wakeLock' in navigator) {
-      navigator.wakeLock.request('screen').catch(()=>{});
+    // Wake lock — keep screen on, and re-acquire if released (e.g. tab backgrounded)
+    let wakeLock = null;
+    async function acquireWakeLock() {
+      if (!('wakeLock' in navigator)) return;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => {
+          // Re-request when it gets released (phone briefly locked, tab switched, etc.)
+          setTimeout(acquireWakeLock, 500);
+        });
+      } catch(e) { /* silently ignore — not supported or denied */ }
     }
+    acquireWakeLock();
+    // Also re-acquire when the page becomes visible again
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') acquireWakeLock();
+    });
   });
 </script>
 <style>

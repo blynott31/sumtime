@@ -129,7 +129,15 @@
     const ev = document.getElementById('active-event-select').value;
     if (!ev) return;
     await set(ref(db, 'activeEvent'), ev);
+    await set(ref(db, 'activeHeat'), null); // reset active heat when event changes
     showStatus('Active event set to Event ' + ev, 'success');
+  };
+
+  window.setActiveHeat = async function() {
+    const ht = document.getElementById('active-heat-select').value;
+    if (!ht) return;
+    await set(ref(db, 'activeHeat'), ht);
+    showStatus('Active heat set to Heat ' + ht, 'success');
   };
 
   window.clearResults = async function() {
@@ -180,17 +188,21 @@
 
     for (const { ev, ht, laneKey, entry } of rows) {
       const isAvg = laneKey === entry.lane + '_avg' || (!laneKey.includes('_') && entry.averaged);
-      const rowClass = isAvg ? 'avg-row' : '';
+      const isDQ = !!entry.dq;
+      const rowClass = [isAvg ? 'avg-row' : '', isDQ ? 'dq-row' : ''].filter(Boolean).join(' ');
       const timerLabel = laneKey.includes('_') ? laneKey.split('_')[1] : (entry.averaged ? 'AVG' : entry.timerName || '—');
+      const dqBtnLabel = isDQ ? '✓ Un-DQ' : '🚫 DQ';
+      const dqBtnClass = isDQ ? 'btn-undq' : 'btn-dq';
       html += `<tr class="${rowClass}">
         <td>Ev ${ev}</td>
         <td>Ht ${ht}</td>
         <td>Ln ${entry.lane || laneKey}</td>
         <td><span class="timer-badge">${timerLabel}</span></td>
-        <td>${entry.swimmer || '—'}</td>
-        <td class="time-val">${entry.timeFormatted || '—'}</td>
+        <td>${entry.swimmer || '—'}${isDQ ? ' <span class="dq-tag">DQ</span>' : ''}</td>
+        <td class="time-val">${isDQ ? '<span class="dq-time">DQ</span>' : (entry.timeFormatted || '—')}</td>
         <td class="action-btns">
           <button class="btn-edit" onclick="openEditModal('${ev}','${ht}','${laneKey}')">✏️ Edit</button>
+          <button class="${dqBtnClass}" onclick="toggleDQ('${ev}','${ht}','${laneKey}')">${dqBtnLabel}</button>
           <button class="btn-del" onclick="deleteEntry('${ev}','${ht}','${laneKey}')">🗑 Delete</button>
         </td>
       </tr>`;
@@ -241,6 +253,17 @@
 
     closeModal();
     showStatus(`✓ Time updated to ${rawTime}`, 'success');
+  };
+
+  window.toggleDQ = async function(ev, ht, laneKey) {
+    const entry = allResults[ev]?.[ht]?.[laneKey];
+    if (!entry) return;
+    const isDQ = !entry.dq;
+    const label = entry.swimmer || laneKey;
+    const action = isDQ ? 'Mark DQ' : 'Remove DQ';
+    if (!confirm(`${action} for ${label} (${entry.timeFormatted || '?'})?`)) return;
+    await set(ref(db, `results/${ev}/${ht}/${laneKey}`), { ...entry, dq: isDQ });
+    showStatus(`${isDQ ? '🚫 DQ flagged' : '✓ DQ removed'} for ${label}`, isDQ ? 'error' : 'success');
   };
 
   window.deleteEntry = async function(ev, ht, laneKey) {
@@ -298,6 +321,14 @@
       sel.innerHTML = events.map(e => `<option value="${e}">Event ${e}</option>`).join('');
       fev.innerHTML = '<option value="">All Events</option>' + events.map(e => `<option value="${e}">Event ${e}</option>`).join('');
       if (events.length) document.getElementById('event-controls').style.display = 'block';
+      updateHeatDropdown();
+    });
+
+    onValue(ref(db, 'activeHeat'), snap => {
+      const ht = snap.val();
+      const sel = document.getElementById('active-heat-select');
+      if (sel && ht) sel.value = ht;
+      document.getElementById('current-active-heat').textContent = ht ? 'Heat ' + ht : '—';
     });
 
     onValue(ref(db, 'activeEvent'), snap => {
@@ -305,8 +336,18 @@
       if (ev) {
         document.getElementById('active-event-select').value = ev;
         document.getElementById('current-active').textContent = 'Currently active: Event ' + ev;
+        updateHeatDropdown(ev);
       }
     });
+
+  function updateHeatDropdown(ev) {
+    ev = ev || document.getElementById('active-event-select').value;
+    const sel = document.getElementById('active-heat-select');
+    sel.innerHTML = '<option value="">— Select Heat —</option>';
+    if (!ev || !heatSheetData[ev]) return;
+    const heats = Object.keys(heatSheetData[ev].heats).sort((a,b)=>Number(a)-Number(b));
+    heats.forEach(h => sel.innerHTML += `<option value="${h}">Heat ${h}</option>`);
+  }
 
     onValue(ref(db, 'results'), snap => {
       const data = snap.val() || {};
@@ -402,10 +443,18 @@
   .avg-row .timer-badge { background: #0a2818; border-color: #1a5030; color: #4ade80; }
 
   .action-btns { display: flex; gap: 6px; }
-  .btn-edit { background: #0a2050; border: 1px solid #1a4080; color: #60a5fa; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
-  .btn-edit:hover { background: #0d2d70; }
-  .btn-del  { background: #2a0d0d; border: 1px solid #6a2020; color: #f87171; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
-  .btn-del:hover { background: #3d1010; }
+  .btn-edit  { background: #0a2050; border: 1px solid #1a4080; color: #60a5fa; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
+  .btn-edit:hover  { background: #0d2d70; }
+  .btn-del   { background: #2a0d0d; border: 1px solid #6a2020; color: #f87171; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
+  .btn-del:hover   { background: #3d1010; }
+  .btn-dq    { background: #2a1a00; border: 1px solid #7a4400; color: #fb923c; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
+  .btn-dq:hover    { background: #3d2600; }
+  .btn-undq  { background: #0d2818; border: 1px solid #1a5030; color: #4ade80; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
+  .btn-undq:hover  { background: #0f3520; }
+
+  .dq-row td { opacity: 0.55; }
+  .dq-tag  { background: #7a1a00; color: #fb923c; font-size: 0.7rem; font-weight: 700; padding: 1px 6px; border-radius: 3px; margin-left: 6px; text-transform: uppercase; }
+  .dq-time { color: #fb923c; font-weight: 700; }
 
   #results-editor { max-height: 500px; overflow-y: auto; }
 
@@ -456,12 +505,20 @@
 
   <div class="card" id="event-controls">
     <h2>🎯 Event Control</h2>
-    <p style="color:#7090b0;font-size:0.9rem;margin-bottom:12px;">Set which event is currently running — timers will see this on their phones.</p>
+    <p style="color:#7090b0;font-size:0.9rem;margin-bottom:12px;">Set the active event and heat — timers will be warned if their selection doesn't match.</p>
+    <div class="controls-row" style="margin-bottom:12px;">
+      <select id="active-event-select" onchange="updateHeatDropdown()"></select>
+      <button class="btn btn-primary" onclick="setActiveEvent()">Set Event</button>
+    </div>
+    <div class="controls-row" style="margin-bottom:12px;">
+      <select id="active-heat-select"><option value="">— Select Heat —</option></select>
+      <button class="btn btn-primary" onclick="setActiveHeat()">Set Heat</button>
+      <span style="font-size:0.8rem;color:#4a7aaa;" id="current-active-heat">—</span>
+    </div>
     <div class="controls-row">
-      <select id="active-event-select"></select>
-      <button class="btn btn-primary" onclick="setActiveEvent()">Set Active Event</button>
       <button class="btn btn-danger" onclick="clearResults()">Clear All Results</button>
     </div>
+    <div style="font-size:0.8rem;color:#4a7aaa;margin-top:10px;" id="current-active">—</div>
   </div>
 
   <div class="card">

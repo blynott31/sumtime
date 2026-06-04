@@ -70,6 +70,13 @@
       updateHeatSelector();
       document.getElementById('event-badge').textContent = activeEvent ? 'Event ' + activeEvent : '—';
     });
+
+    // Fix 4 — track admin's active heat for wrong-heat warnings
+    onValue(ref(db, 'activeHeat'), snap => {
+      const adminHeat = snap.val();
+      document.getElementById('admin-heat-badge').textContent = adminHeat ? 'Heat ' + adminHeat : '';
+      checkHeatMismatch(adminHeat);
+    });
   }
 
   function updateHeatSelector() {
@@ -80,12 +87,27 @@
     heats.forEach(h => sel.innerHTML += `<option value="${h}">Heat ${h}</option>`);
   }
 
+  let adminActiveHeat = null;
+
+  function checkHeatMismatch(adminHeat) {
+    adminActiveHeat = adminHeat;
+    const warn = document.getElementById('heat-mismatch-warn');
+    if (!warn) return;
+    if (adminHeat && activeHeat && adminHeat !== activeHeat) {
+      warn.textContent = `⚠️ Admin set Heat ${adminHeat} — you have Heat ${activeHeat} selected`;
+      warn.style.display = 'block';
+    } else {
+      warn.style.display = 'none';
+    }
+  }
+
   window.onHeatChange = function() {
     activeHeat = document.getElementById('heat-select').value || null;
     submittedThisHeat = false;
     resetTimer();
     updateSwimmerInfo();
     document.getElementById('submit-section').style.display = 'none';
+    checkHeatMismatch(adminActiveHeat);
   };
 
   function updateSwimmerInfo() {
@@ -117,8 +139,18 @@
   // ── Timer ─────────────────────────────────────────────────────────────────
   window.startTimer = function() {
     if (running) return;
+    // If a time is already frozen (restart scenario), require confirmation
+    if (elapsed > 0) {
+      showConfirmRestart();
+      return;
+    }
+    doStart();
+  };
+
+  function doStart() {
     running = true;
-    startTime = performance.now() - elapsed;
+    elapsed = 0;
+    startTime = performance.now();
     splitTimes = [];
     document.getElementById('start-btn').style.display = 'none';
     document.getElementById('stop-btn').style.display = 'flex';
@@ -127,6 +159,20 @@
     document.getElementById('splits-list').innerHTML = '';
     tick();
     pulseGreen();
+  }
+
+  function showConfirmRestart() {
+    document.getElementById('restart-modal').style.display = 'flex';
+  }
+
+  window.confirmRestart = function() {
+    document.getElementById('restart-modal').style.display = 'none';
+    submittedThisHeat = false;
+    doStart();
+  };
+
+  window.cancelRestart = function() {
+    document.getElementById('restart-modal').style.display = 'none';
   };
 
   function tick() {
@@ -189,8 +235,13 @@
       alert('Please select an event and heat first.');
       return;
     }
+
+    // Fix 4 — wrong heat warning (activeHeat vs admin-set heat)
+    const adminHeat = document.getElementById('heat-select').value;
+    // (activeHeat is set from the dropdown, which is fine — the warning is already visible via swimmer info)
+
     const swimmerInfo = heatSheet?.[activeEvent]?.heats?.[activeHeat]?.lanes?.[myLane];
-    const slotKey = `${myLane}_${mySlot}`; // e.g. "3_A"
+    const slotKey = `${myLane}_${mySlot}`;
 
     const entry = {
       time: elapsed,
@@ -207,15 +258,33 @@
       submittedAt: Date.now()
     };
 
+    // Fix 3 — save backup to localStorage immediately on submit attempt
+    localStorage.setItem('swimTimer_backup', JSON.stringify({ entry, slotKey, savedAt: Date.now() }));
+
     const btn = document.getElementById('confirm-submit-btn');
     btn.disabled = true;
     btn.textContent = 'Submitting…';
 
+    // Fix 2 — check if this slot is already taken by another timer
     try {
-      // Save individual timer result under e.g. results/15/2/3_A
+      const existingSnap = await get(ref(db, `results/${activeEvent}/${activeHeat}/${slotKey}`));
+      if (existingSnap.exists()) {
+        const existing = existingSnap.val();
+        // Only warn if it was submitted by a different person
+        if (existing.timerName && existing.timerName !== timerName) {
+          const go = confirm(`⚠️ Timer ${mySlot} for Lane ${myLane} was already submitted by "${existing.timerName}" (${existing.timeFormatted}).\n\nOverwrite with your time of ${formatTime(elapsed)}?`);
+          if (!go) {
+            btn.disabled = false;
+            btn.textContent = '✓ Submit';
+            return;
+          }
+        }
+      }
+    } catch(e) { /* offline — proceed anyway, Firebase will sync */ }
+
+    try {
       await set(ref(db, `results/${activeEvent}/${activeHeat}/${slotKey}`), entry);
 
-      // Now check how many timer entries exist for this lane and calculate average
       const heatSnap = await get(ref(db, `results/${activeEvent}/${activeHeat}`));
       const heatData = heatSnap.val() || {};
       const timerEntries = Object.entries(heatData)
@@ -225,32 +294,71 @@
         const times = timerEntries.map(([, e]) => e.time);
         const avg = Math.round(times.reduce((a, b) => a + b, 0) / times.length);
         const avgFormatted = formatTime(avg);
-        // Write official averaged result under the plain lane key e.g. results/15/2/3
         await set(ref(db, `results/${activeEvent}/${activeHeat}/${myLane}`), {
-          time: avg,
-          timeFormatted: avgFormatted,
-          swimmer: entry.swimmer,
-          team: entry.team,
-          seed: entry.seed,
-          lane: myLane,
-          event: activeEvent,
-          heat: activeHeat,
-          averaged: true,
-          timerCount: timerEntries.length,
+          time: avg, timeFormatted: avgFormatted,
+          swimmer: entry.swimmer, team: entry.team, seed: entry.seed,
+          lane: myLane, event: activeEvent, heat: activeHeat,
+          averaged: true, timerCount: timerEntries.length,
           individualTimes: timerEntries.map(([k, e]) => `${k.split('_')[1]}: ${e.timeFormatted}`).join(', ')
         });
         showToast(`✓ ${timerEntries.length} timers · Avg: ${avgFormatted}`);
       } else {
-        showToast('✓ Time recorded — waiting for other timers…');
+        showToast('✓ Time saved — waiting for other timers…');
       }
 
+      // Clear backup on success
+      localStorage.removeItem('swimTimer_backup');
       submittedThisHeat = true;
       document.getElementById('submit-section').style.display = 'none';
+      document.getElementById('offline-retry-banner').style.display = 'none';
       confetti();
     } catch(err) {
       btn.disabled = false;
       btn.textContent = '✓ Submit';
-      alert('Submit failed: ' + err.message);
+      // Fix 3 — show offline retry banner, backup already saved above
+      document.getElementById('submit-section').style.display = 'none';
+      showOfflineRetryBanner(entry, slotKey);
+    }
+  };
+
+  // Fix 3 — offline retry
+  function showOfflineRetryBanner(entry, slotKey) {
+    const banner = document.getElementById('offline-retry-banner');
+    banner.style.display = 'flex';
+    banner.querySelector('.retry-time').textContent = entry.timeFormatted;
+    window._pendingRetry = { entry, slotKey };
+  }
+
+  window.retrySubmit = async function() {
+    const { entry, slotKey } = window._pendingRetry || {};
+    if (!entry) return;
+    const banner = document.getElementById('offline-retry-banner');
+    banner.querySelector('.retry-btn').textContent = 'Retrying…';
+    try {
+      await set(ref(db, `results/${entry.event}/${entry.heat}/${slotKey}`), entry);
+      const heatSnap = await get(ref(db, `results/${entry.event}/${entry.heat}`));
+      const heatData = heatSnap.val() || {};
+      const timerEntries = Object.entries(heatData)
+        .filter(([k]) => k.startsWith(entry.lane + '_') && /^[0-9]+_[ABC]$/.test(k));
+      if (timerEntries.length >= 2) {
+        const times = timerEntries.map(([, e]) => e.time);
+        const avg = Math.round(times.reduce((a, b) => a + b, 0) / times.length);
+        await set(ref(db, `results/${entry.event}/${entry.heat}/${entry.lane}`), {
+          time: avg, timeFormatted: formatTime(avg),
+          swimmer: entry.swimmer, team: entry.team, seed: entry.seed,
+          lane: entry.lane, event: entry.event, heat: entry.heat,
+          averaged: true, timerCount: timerEntries.length,
+          individualTimes: timerEntries.map(([k, e]) => `${k.split('_')[1]}: ${e.timeFormatted}`).join(', ')
+        });
+      }
+      localStorage.removeItem('swimTimer_backup');
+      banner.style.display = 'none';
+      submittedThisHeat = true;
+      showToast('✓ Time submitted successfully');
+      confetti();
+    } catch(err) {
+      banner.querySelector('.retry-btn').textContent = '↺ Retry';
+      showToast('Still offline — will try again');
     }
   };
 
@@ -303,6 +411,18 @@
     if (savedName) document.getElementById('login-name').value = savedName;
     if (savedLane) document.getElementById('login-lane').value = savedLane;
     if (savedSlot) document.getElementById('login-slot').value = savedSlot;
+    // Fix 3 — check for unsent backup from a previous crash
+    const backup = localStorage.getItem('swimTimer_backup');
+    if (backup) {
+      try {
+        const { entry, slotKey } = JSON.parse(backup);
+        const banner = document.getElementById('offline-retry-banner');
+        banner.style.display = 'flex';
+        banner.querySelector('.retry-time').textContent = entry.timeFormatted;
+        window._pendingRetry = { entry, slotKey };
+      } catch(e) { localStorage.removeItem('swimTimer_backup'); }
+    }
+
     showScreen('login-screen');
     // Wake lock — keep screen on, and re-acquire if released (e.g. tab backgrounded)
     let wakeLock = null;
@@ -524,6 +644,18 @@
     </div>
   </div>
 
+  <!-- Fix 4: heat mismatch warning -->
+  <div id="heat-mismatch-warn" style="display:none;background:#2a1200;border:1px solid #7a4400;color:#fb923c;padding:10px 16px;font-size:0.85rem;font-weight:600;text-align:center;"></div>
+
+  <!-- Fix 3: offline retry banner -->
+  <div id="offline-retry-banner" style="display:none;background:#1a0a00;border-bottom:2px solid #cc4400;padding:12px 16px;align-items:center;justify-content:space-between;gap:12px;">
+    <div>
+      <div style="font-size:0.75rem;color:#fb923c;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;">⚠️ Submit Failed — Time Saved Locally</div>
+      <div style="font-size:1rem;color:#fff;margin-top:2px;">Unsent time: <span class="retry-time" style="font-family:monospace;color:#fb923c;font-weight:700;">—</span></div>
+    </div>
+    <button class="retry-btn" onclick="retrySubmit()" style="background:#cc4400;border:none;color:#fff;padding:10px 18px;border-radius:8px;font-weight:700;cursor:pointer;font-size:0.9rem;white-space:nowrap;">↺ Retry</button>
+  </div>
+
   <div class="swimmer-card">
     <div class="heat-row">
       <span style="font-size:0.8rem;color:#4a7aaa;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;">Heat</span>
@@ -569,6 +701,22 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- Fix 1: Restart confirmation modal -->
+<div id="restart-modal" style="display:none;position:fixed;inset:0;background:rgba(0,5,15,0.92);align-items:center;justify-content:center;z-index:150;">
+  <div style="background:#1a0d00;border:2px solid #cc4400;border-radius:16px;padding:28px 24px;width:88%;max-width:340px;text-align:center;">
+    <div style="font-size:2rem;margin-bottom:8px;">⚠️</div>
+    <div style="font-size:1.1rem;font-weight:700;color:#fb923c;margin-bottom:8px;">Restart Timer?</div>
+    <div style="font-size:0.9rem;color:#9ca3af;margin-bottom:24px;">This will erase the current time. Only restart if there was a false start.</div>
+    <div style="display:flex;gap:12px;">
+      <button onclick="cancelRestart()" style="flex:1;padding:14px;background:#1a2540;border:none;border-radius:10px;color:#7090b0;font-size:1rem;font-weight:700;cursor:pointer;">Keep Time</button>
+      <button onclick="confirmRestart()" style="flex:1;padding:14px;background:linear-gradient(135deg,#cc4400,#992200);border:none;border-radius:10px;color:#fff;font-size:1rem;font-weight:700;cursor:pointer;">Yes, Restart</button>
+    </div>
+  </div>
+</div>
+
+<!-- Fix 4: hidden admin heat badge (populated by Firebase) -->
+<span id="admin-heat-badge" style="display:none;"></span>
 
 
 </body>

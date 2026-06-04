@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SwimMeet Admin</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, get, remove, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyB3llneR7FacPey8nUYj17zPhMnqmg7iIw",
+    authDomain: "sumtime-1931f.firebaseapp.com",
+    databaseURL: "https://sumtime-1931f-default-rtdb.firebaseio.com",
+    projectId: "sumtime-1931f",
+    storageBucket: "sumtime-1931f.firebasestorage.app",
+    messagingSenderId: "396135184476",
+    appId: "1:396135184476:web:adc8572d95792a5fe24e99"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  let parsedMeet = null;
+
+  window.handleFile = function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      try {
+        const wb = XLSX.read(ev.target.result, { type: 'binary' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+        parsedMeet = parseHeatSheet(rows);
+        renderPreview(parsedMeet);
+        document.getElementById('upload-btn').disabled = false;
+        showStatus('Heat sheet parsed — ' + Object.keys(parsedMeet).length + ' events found. Review below then click Upload.', 'info');
+      } catch(err) {
+        showStatus('Error parsing file: ' + err.message, 'error');
+      }
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  function parseHeatSheet(rows) {
+    // Expected columns: Event, Heat, Lane, LastName, FirstName, Team, Seed
+    // First row = headers
+    const headers = rows[0].map(h => String(h).trim().toLowerCase());
+    const eventIdx = headers.findIndex(h => h.includes('event'));
+    const heatIdx  = headers.findIndex(h => h.includes('heat'));
+    const laneIdx  = headers.findIndex(h => h.includes('lane'));
+    const lastIdx  = headers.findIndex(h => h.includes('last'));
+    const firstIdx = headers.findIndex(h => h.includes('first'));
+    const teamIdx  = headers.findIndex(h => h.includes('team'));
+    const seedIdx  = headers.findIndex(h => h.includes('seed'));
+    const nameIdx  = headers.findIndex(h => h === 'name' || h === 'swimmer');
+
+    if (eventIdx === -1 || heatIdx === -1 || laneIdx === -1) {
+      throw new Error('Columns not found. Need at minimum: Event, Heat, Lane columns.');
+    }
+
+    const meet = {};
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      const evNum = String(r[eventIdx]).trim();
+      const htNum = String(r[heatIdx]).trim();
+      const lnNum = String(r[laneIdx]).trim();
+      if (!evNum || !htNum || !lnNum || evNum === '' || isNaN(evNum)) continue;
+
+      let name = '';
+      if (lastIdx !== -1 && firstIdx !== -1) {
+        name = (String(r[firstIdx]).trim() + ' ' + String(r[lastIdx]).trim()).trim();
+      } else if (nameIdx !== -1) {
+        name = String(r[nameIdx]).trim();
+      } else {
+        name = 'Lane ' + lnNum;
+      }
+      const team = teamIdx !== -1 ? String(r[teamIdx]).trim() : '';
+      const seed = seedIdx !== -1 ? String(r[seedIdx]).trim() : '';
+
+      if (!meet[evNum]) meet[evNum] = { heats: {} };
+      if (!meet[evNum].heats[htNum]) meet[evNum].heats[htNum] = { lanes: {} };
+      meet[evNum].heats[htNum].lanes[lnNum] = { name, team, seed };
+    }
+    return meet;
+  }
+
+  function renderPreview(meet) {
+    const events = Object.keys(meet).sort((a,b) => Number(a)-Number(b));
+    let html = '<table><thead><tr><th>Event</th><th>Heat</th><th>Lane</th><th>Swimmer</th><th>Team</th><th>Seed</th></tr></thead><tbody>';
+    for (const ev of events) {
+      const heats = Object.keys(meet[ev].heats).sort((a,b)=>Number(a)-Number(b));
+      for (const ht of heats) {
+        const lanes = Object.keys(meet[ev].heats[ht].lanes).sort((a,b)=>Number(a)-Number(b));
+        for (const ln of lanes) {
+          const s = meet[ev].heats[ht].lanes[ln];
+          html += `<tr><td>Ev ${ev}</td><td>Ht ${ht}</td><td>Ln ${ln}</td><td>${s.name}</td><td>${s.team}</td><td>${s.seed}</td></tr>`;
+        }
+      }
+    }
+    html += '</tbody></table>';
+    document.getElementById('preview').innerHTML = html;
+    document.getElementById('preview-section').style.display = 'block';
+  }
+
+  window.uploadMeet = async function() {
+    if (!parsedMeet) return;
+    const btn = document.getElementById('upload-btn');
+    btn.disabled = true;
+    btn.textContent = 'Uploading…';
+    try {
+      await set(ref(db, 'heatSheet'), parsedMeet);
+      await set(ref(db, 'results'), null);
+      await set(ref(db, 'activeEvent'), Object.keys(parsedMeet).sort((a,b)=>Number(a)-Number(b))[0]);
+      showStatus('✓ Heat sheet uploaded successfully! Timers can now connect.', 'success');
+      btn.textContent = 'Upload Complete ✓';
+      loadCurrentState();
+    } catch(err) {
+      showStatus('Upload failed: ' + err.message, 'error');
+      btn.disabled = false;
+      btn.textContent = 'Upload to Firebase';
+    }
+  };
+
+  window.setActiveEvent = async function() {
+    const ev = document.getElementById('active-event-select').value;
+    if (!ev) return;
+    await set(ref(db, 'activeEvent'), ev);
+    showStatus('Active event set to Event ' + ev, 'success');
+  };
+
+  window.clearResults = async function() {
+    if (!confirm('Clear ALL results? This cannot be undone.')) return;
+    await set(ref(db, 'results'), null);
+    showStatus('Results cleared.', 'info');
+  };
+
+  function loadCurrentState() {
+    onValue(ref(db, 'heatSheet'), snap => {
+      const data = snap.val();
+      if (!data) return;
+      const events = Object.keys(data).sort((a,b)=>Number(a)-Number(b));
+      const sel = document.getElementById('active-event-select');
+      sel.innerHTML = events.map(e => `<option value="${e}">Event ${e}</option>`).join('');
+      document.getElementById('event-controls').style.display = 'block';
+    }, { onlyOnce: true });
+
+    onValue(ref(db, 'activeEvent'), snap => {
+      const ev = snap.val();
+      if (ev) {
+        const sel = document.getElementById('active-event-select');
+        sel.value = ev;
+        document.getElementById('current-active').textContent = 'Currently active: Event ' + ev;
+      }
+    });
+
+    onValue(ref(db, 'results'), snap => {
+      const data = snap.val() || {};
+      let count = 0;
+      for (const ev in data) for (const ht in data[ev]) for (const ln in data[ev][ht]) count++;
+      document.getElementById('result-count').textContent = count + ' times recorded';
+    });
+  }
+
+  function showStatus(msg, type) {
+    const el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = 'status ' + type;
+    el.style.display = 'block';
+  }
+
+  document.addEventListener('DOMContentLoaded', loadCurrentState);
+</script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #0a0e1a; color: #e0e8ff; min-height: 100vh; }
+
+  header {
+    background: linear-gradient(135deg, #0066cc, #003380);
+    padding: 24px 32px;
+    display: flex; align-items: center; gap: 16px;
+    border-bottom: 2px solid #0088ff;
+  }
+  header .logo { font-size: 2rem; }
+  header h1 { font-size: 1.6rem; font-weight: 700; color: #fff; }
+  header p { font-size: 0.9rem; color: #99ccff; margin-top: 2px; }
+
+  main { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+
+  .card {
+    background: #111827;
+    border: 1px solid #1e3a5f;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .card h2 { font-size: 1.1rem; color: #60a5fa; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+
+  .upload-zone {
+    border: 2px dashed #1e3a5f;
+    border-radius: 10px;
+    padding: 40px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+  }
+  .upload-zone:hover { border-color: #0088ff; background: #0a1628; }
+  .upload-zone input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .upload-zone .icon { font-size: 3rem; margin-bottom: 12px; }
+  .upload-zone p { color: #7090b0; font-size: 0.95rem; }
+  .upload-zone strong { color: #60a5fa; }
+
+  .btn {
+    display: inline-block; padding: 12px 28px; border-radius: 8px;
+    font-size: 1rem; font-weight: 600; cursor: pointer; border: none;
+    transition: all 0.2s;
+  }
+  .btn-primary { background: linear-gradient(135deg, #0066cc, #0044aa); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, #0077ee, #0055cc); transform: translateY(-1px); }
+  .btn-danger { background: linear-gradient(135deg, #cc2200, #991100); color: #fff; }
+  .btn-danger:hover { background: linear-gradient(135deg, #ee3311, #bb2200); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+  .status {
+    display: none; padding: 12px 16px; border-radius: 8px;
+    margin-bottom: 20px; font-weight: 500;
+  }
+  .status.success { background: #0d3320; border: 1px solid #2d8a50; color: #4ade80; }
+  .status.error   { background: #330d0d; border: 1px solid #8a2d2d; color: #f87171; }
+  .status.info    { background: #0d1f33; border: 1px solid #2d5a8a; color: #60a5fa; }
+
+  .controls-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+  select {
+    background: #1a2540; border: 1px solid #2d4a7a; color: #e0e8ff;
+    padding: 10px 14px; border-radius: 8px; font-size: 0.95rem; cursor: pointer;
+  }
+
+  #event-controls { display: none; }
+  #preview-section { display: none; }
+  #preview { max-height: 400px; overflow-y: auto; margin-top: 16px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  thead { position: sticky; top: 0; background: #0a1628; }
+  th { padding: 10px 12px; text-align: left; color: #60a5fa; border-bottom: 1px solid #1e3a5f; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { padding: 8px 12px; border-bottom: 1px solid #111827; }
+  tr:hover td { background: #0d1f33; }
+
+  .stat-row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .stat { background: #0a1628; border: 1px solid #1e3a5f; border-radius: 8px; padding: 14px 20px; flex: 1; min-width: 140px; }
+  .stat-label { font-size: 0.75rem; color: #7090b0; text-transform: uppercase; letter-spacing: 0.08em; }
+  .stat-value { font-size: 1.4rem; font-weight: 700; color: #60a5fa; margin-top: 4px; }
+
+  .csv-hint { background: #0a1628; border-left: 3px solid #0066cc; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.85rem; color: #7090b0; margin-top: 12px; }
+  .csv-hint code { background: #1a2540; padding: 2px 6px; border-radius: 4px; color: #93c5fd; font-family: monospace; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">🏊</div>
+  <div>
+    <h1>SwimMeet Admin</h1>
+    <p>Heat Sheet Management &amp; Meet Control</p>
+  </div>
+</header>
+<main>
+  <div id="status" class="status"></div>
+
+  <div class="card">
+    <h2>📊 Meet Status</h2>
+    <div class="stat-row">
+      <div class="stat"><div class="stat-label">Results Recorded</div><div class="stat-value" id="result-count">—</div></div>
+      <div class="stat"><div class="stat-label">Active Event</div><div class="stat-value" id="current-active">—</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📁 Upload Heat Sheet</h2>
+    <div class="upload-zone">
+      <input type="file" accept=".xlsx,.xls,.csv" onchange="handleFile(event)">
+      <div class="icon">📋</div>
+      <p><strong>Click to select your heat sheet</strong></p>
+      <p>.xlsx or .csv — first row must be headers</p>
+    </div>
+    <div class="csv-hint">
+      Required columns: <code>Event</code> <code>Heat</code> <code>Lane</code> <code>FirstName</code> <code>LastName</code> (or <code>Name</code>) — and optionally <code>Team</code> <code>Seed</code>
+    </div>
+    <div style="margin-top:16px;">
+      <button class="btn btn-primary" id="upload-btn" onclick="uploadMeet()" disabled>Upload to Firebase</button>
+    </div>
+  </div>
+
+  <div class="card" id="event-controls">
+    <h2>🎯 Event Control</h2>
+    <p style="color:#7090b0;font-size:0.9rem;margin-bottom:12px;">Set which event is currently running — timers will see this on their phones.</p>
+    <div class="controls-row">
+      <select id="active-event-select"></select>
+      <button class="btn btn-primary" onclick="setActiveEvent()">Set Active Event</button>
+      <button class="btn btn-danger" onclick="clearResults()">Clear All Results</button>
+    </div>
+  </div>
+
+  <div class="card" id="preview-section">
+    <h2>👁 Preview</h2>
+    <div id="preview"></div>
+  </div>
+</main>
+</body>
+</html>

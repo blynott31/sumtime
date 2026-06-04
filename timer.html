@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>SwimMeet Timer</title>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, get, onValue, push, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyB3llneR7FacPey8nUYj17zPhMnqmg7iIw",
+    authDomain: "sumtime-1931f.firebaseapp.com",
+    databaseURL: "https://sumtime-1931f-default-rtdb.firebaseio.com",
+    projectId: "sumtime-1931f",
+    storageBucket: "sumtime-1931f.firebasestorage.app",
+    messagingSenderId: "396135184476",
+    appId: "1:396135184476:web:adc8572d95792a5fe24e99"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  let timerName = '';
+  let myLane = null;
+  let activeEvent = null;
+  let activeHeat = null;
+  let heatSheet = null;
+
+  let startTime = null;
+  let elapsed = 0;
+  let running = false;
+  let rafId = null;
+  let splitTimes = [];
+  let submittedThisHeat = false;
+
+  // ── Login ─────────────────────────────────────────────────────────────────
+  window.doLogin = function() {
+    const name = document.getElementById('login-name').value.trim();
+    const lane = document.getElementById('login-lane').value;
+    if (!name) { shake('login-name'); return; }
+    if (!lane)  { shake('login-lane'); return; }
+    timerName = name;
+    myLane = lane;
+    localStorage.setItem('swimTimer_name', name);
+    localStorage.setItem('swimTimer_lane', lane);
+    showScreen('main-screen');
+    subscribeToMeet();
+  };
+
+  function shake(id) {
+    const el = document.getElementById(id);
+    el.classList.add('shake');
+    setTimeout(() => el.classList.remove('shake'), 500);
+  }
+
+  // ── Firebase subscriptions ─────────────────────────────────────────────
+  function subscribeToMeet() {
+    onValue(ref(db, 'heatSheet'), snap => { heatSheet = snap.val(); updateSwimmerInfo(); });
+    onValue(ref(db, 'activeEvent'), snap => {
+      activeEvent = snap.val();
+      activeHeat = null;
+      submittedThisHeat = false;
+      resetTimer();
+      updateSwimmerInfo();
+      updateHeatSelector();
+      document.getElementById('event-badge').textContent = activeEvent ? 'Event ' + activeEvent : '—';
+    });
+  }
+
+  function updateHeatSelector() {
+    const sel = document.getElementById('heat-select');
+    sel.innerHTML = '<option value="">— Select Heat —</option>';
+    if (!heatSheet || !activeEvent || !heatSheet[activeEvent]) return;
+    const heats = Object.keys(heatSheet[activeEvent].heats).sort((a,b)=>Number(a)-Number(b));
+    heats.forEach(h => sel.innerHTML += `<option value="${h}">Heat ${h}</option>`);
+  }
+
+  window.onHeatChange = function() {
+    activeHeat = document.getElementById('heat-select').value || null;
+    submittedThisHeat = false;
+    resetTimer();
+    updateSwimmerInfo();
+    document.getElementById('submit-section').style.display = 'none';
+  };
+
+  function updateSwimmerInfo() {
+    const nameEl = document.getElementById('swimmer-name');
+    const teamEl = document.getElementById('swimmer-team');
+    const seedEl = document.getElementById('swimmer-seed');
+    const laneEl = document.getElementById('lane-badge');
+
+    laneEl.textContent = 'Lane ' + myLane;
+
+    if (!heatSheet || !activeEvent || !activeHeat) {
+      nameEl.textContent = 'Waiting for heat…';
+      teamEl.textContent = '';
+      seedEl.textContent = '';
+      return;
+    }
+    const heatData = heatSheet[activeEvent]?.heats?.[activeHeat]?.lanes?.[myLane];
+    if (heatData) {
+      nameEl.textContent = heatData.name || '—';
+      teamEl.textContent = heatData.team ? '🏫 ' + heatData.team : '';
+      seedEl.textContent = heatData.seed ? '⏱ Seed: ' + heatData.seed : '';
+    } else {
+      nameEl.textContent = '(No swimmer in this lane)';
+      teamEl.textContent = '';
+      seedEl.textContent = '';
+    }
+  }
+
+  // ── Timer ─────────────────────────────────────────────────────────────────
+  window.startTimer = function() {
+    if (running) return;
+    running = true;
+    startTime = performance.now() - elapsed;
+    splitTimes = [];
+    document.getElementById('start-btn').style.display = 'none';
+    document.getElementById('stop-btn').style.display = 'flex';
+    document.getElementById('split-btn').style.display = 'flex';
+    document.getElementById('submit-section').style.display = 'none';
+    document.getElementById('splits-list').innerHTML = '';
+    tick();
+    pulseGreen();
+  };
+
+  function tick() {
+    elapsed = performance.now() - startTime;
+    document.getElementById('timer-display').textContent = formatTime(elapsed);
+    if (running) rafId = requestAnimationFrame(tick);
+  }
+
+  window.stopTimer = function() {
+    if (!running) return;
+    running = false;
+    cancelAnimationFrame(rafId);
+    document.getElementById('stop-btn').style.display = 'none';
+    document.getElementById('split-btn').style.display = 'none';
+    document.getElementById('start-btn').style.display = 'flex';
+    document.getElementById('start-btn').textContent = '↺ Restart';
+    document.getElementById('timer-display').classList.add('stopped');
+    setTimeout(() => document.getElementById('timer-display').classList.remove('stopped'), 600);
+    if (!submittedThisHeat) {
+      document.getElementById('submit-section').style.display = 'block';
+      document.getElementById('final-time').textContent = formatTime(elapsed);
+    }
+  };
+
+  window.recordSplit = function() {
+    if (!running) return;
+    splitTimes.push(elapsed);
+    const li = document.createElement('li');
+    li.textContent = 'Split ' + splitTimes.length + ': ' + formatTime(elapsed);
+    li.style.animation = 'fadeIn 0.3s ease';
+    document.getElementById('splits-list').prepend(li);
+  };
+
+  function resetTimer() {
+    running = false;
+    cancelAnimationFrame(rafId);
+    elapsed = 0;
+    splitTimes = [];
+    document.getElementById('timer-display').textContent = '0:00.00';
+    document.getElementById('start-btn').style.display = 'flex';
+    document.getElementById('start-btn').textContent = '▶ START';
+    document.getElementById('stop-btn').style.display = 'none';
+    document.getElementById('split-btn').style.display = 'none';
+    document.getElementById('splits-list').innerHTML = '';
+  }
+
+  window.submitTime = async function() {
+    if (!activeEvent || !activeHeat) {
+      alert('Please select an event and heat first.');
+      return;
+    }
+    const swimmerInfo = heatSheet?.[activeEvent]?.heats?.[activeHeat]?.lanes?.[myLane];
+    const entry = {
+      time: elapsed,
+      timeFormatted: formatTime(elapsed),
+      swimmer: swimmerInfo?.name || 'Lane ' + myLane,
+      team: swimmerInfo?.team || '',
+      seed: swimmerInfo?.seed || '',
+      lane: myLane,
+      event: activeEvent,
+      heat: activeHeat,
+      timerName: timerName,
+      splits: splitTimes.map(formatTime),
+      submittedAt: Date.now()
+    };
+
+    const btn = document.getElementById('confirm-submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Submitting…';
+
+    try {
+      await set(ref(db, `results/${activeEvent}/${activeHeat}/${myLane}`), entry);
+      submittedThisHeat = true;
+      document.getElementById('submit-section').style.display = 'none';
+      showToast('✓ Time submitted: ' + formatTime(elapsed));
+      confetti();
+    } catch(err) {
+      btn.disabled = false;
+      btn.textContent = 'Confirm Submit';
+      alert('Submit failed: ' + err.message);
+    }
+  };
+
+  window.cancelSubmit = function() {
+    document.getElementById('submit-section').style.display = 'none';
+  };
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function formatTime(ms) {
+    const totalMs = Math.round(ms);
+    const mins = Math.floor(totalMs / 60000);
+    const secs = Math.floor((totalMs % 60000) / 1000);
+    const hundredths = Math.floor((totalMs % 1000) / 10);
+    return `${mins}:${String(secs).padStart(2,'0')}.${String(hundredths).padStart(2,'0')}`;
+  }
+
+  function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
+    document.getElementById(id).style.display = 'flex';
+  }
+
+  function pulseGreen() {
+    const d = document.getElementById('timer-display');
+    d.classList.add('pulse');
+    setTimeout(() => d.classList.remove('pulse'), 400);
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3000);
+  }
+
+  function confetti() {
+    const colors = ['#0088ff','#00ccff','#ffffff','#60a5fa'];
+    for (let i = 0; i < 40; i++) {
+      const el = document.createElement('div');
+      el.className = 'confetti-piece';
+      el.style.cssText = `left:${Math.random()*100}%;background:${colors[Math.floor(Math.random()*colors.length)]};animation-delay:${Math.random()*0.5}s;animation-duration:${0.8+Math.random()*0.6}s;width:${4+Math.random()*6}px;height:${4+Math.random()*6}px;`;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 1500);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const savedName = localStorage.getItem('swimTimer_name');
+    const savedLane = localStorage.getItem('swimTimer_lane');
+    if (savedName) document.getElementById('login-name').value = savedName;
+    if (savedLane) document.getElementById('login-lane').value = savedLane;
+    showScreen('login-screen');
+    // wake lock to prevent screen sleep
+    if ('wakeLock' in navigator) {
+      navigator.wakeLock.request('screen').catch(()=>{});
+    }
+  });
+</script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #050a14; color: #e0e8ff; min-height: 100vh; overflow-x: hidden; }
+
+  .screen { display: none; flex-direction: column; min-height: 100vh; }
+
+  /* ── Login ── */
+  #login-screen {
+    align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center top, #001840 0%, #050a14 70%);
+    padding: 32px 24px;
+  }
+  .login-logo { font-size: 5rem; margin-bottom: 8px; animation: float 3s ease-in-out infinite; }
+  @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+  .login-title { font-size: 2rem; font-weight: 800; color: #fff; text-align: center; }
+  .login-sub { color: #4a7aaa; margin-bottom: 40px; text-align: center; font-size: 1rem; }
+  .login-card {
+    background: #0d1b2e; border: 1px solid #1a3050; border-radius: 16px;
+    padding: 28px 24px; width: 100%; max-width: 380px;
+  }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 0.8rem; color: #4a7aaa; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
+  .field input, .field select {
+    width: 100%; padding: 14px 16px; background: #0a1628; border: 1px solid #1e3a5f;
+    border-radius: 10px; color: #e0e8ff; font-size: 1rem;
+    transition: border-color 0.2s;
+  }
+  .field input:focus, .field select:focus { outline: none; border-color: #0088ff; }
+  .field select { appearance: none; cursor: pointer; }
+
+  .btn-login {
+    width: 100%; padding: 16px; background: linear-gradient(135deg, #0066ff, #0044cc);
+    border: none; border-radius: 10px; color: #fff; font-size: 1.1rem; font-weight: 700;
+    cursor: pointer; margin-top: 8px; transition: all 0.2s;
+    box-shadow: 0 4px 20px rgba(0,100,255,0.4);
+  }
+  .btn-login:active { transform: scale(0.97); }
+
+  @keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-6px)} 75%{transform:translateX(6px)} }
+  .shake { animation: shake 0.4s ease; border-color: #ff4444 !important; }
+
+  /* ── Main Timer Screen ── */
+  #main-screen { flex-direction: column; }
+
+  .top-bar {
+    background: linear-gradient(135deg, #001840, #000d26);
+    padding: 12px 20px;
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid #0d2850;
+  }
+  .top-bar .logo-sm { font-size: 1.2rem; font-weight: 800; color: #60a5fa; }
+  .badge {
+    background: #0a2050; border: 1px solid #1a4080; border-radius: 20px;
+    padding: 4px 12px; font-size: 0.75rem; color: #60a5fa; font-weight: 600;
+  }
+
+  .swimmer-card {
+    background: linear-gradient(135deg, #001840, #000d26);
+    margin: 16px; border-radius: 14px; padding: 20px;
+    border: 1px solid #0d2850;
+  }
+  .heat-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .heat-row select {
+    flex: 1; background: #0a1628; border: 1px solid #1e3a5f;
+    color: #e0e8ff; padding: 10px 14px; border-radius: 8px; font-size: 0.95rem;
+  }
+  .swimmer-name { font-size: 1.5rem; font-weight: 800; color: #fff; line-height: 1.2; }
+  .swimmer-meta { display: flex; gap: 12px; margin-top: 6px; flex-wrap: wrap; }
+  .swimmer-meta span { font-size: 0.85rem; color: #4a7aaa; }
+
+  .timer-section {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; padding: 20px;
+  }
+  .timer-display {
+    font-size: clamp(3.5rem, 15vw, 6rem); font-weight: 900;
+    font-variant-numeric: tabular-nums; font-family: 'Courier New', monospace;
+    color: #fff; text-shadow: 0 0 30px rgba(0,136,255,0.5);
+    letter-spacing: 0.02em; transition: color 0.2s;
+  }
+  @keyframes pulseGreen { 0%,100%{color:#fff} 50%{color:#4ade80} }
+  .timer-display.pulse { animation: pulseGreen 0.3s ease; }
+  @keyframes flashRed { 0%,100%{color:#fff} 50%{color:#f87171} }
+  .timer-display.stopped { animation: flashRed 0.5s ease; }
+
+  .btn-row { display: flex; gap: 12px; margin-top: 24px; width: 100%; max-width: 380px; }
+  .timer-btn {
+    flex: 1; padding: 20px 0; border-radius: 14px; border: none;
+    font-size: 1.1rem; font-weight: 800; cursor: pointer;
+    transition: all 0.15s; display: flex; align-items: center; justify-content: center; gap: 6px;
+    -webkit-user-select: none; user-select: none;
+  }
+  #start-btn  { background: linear-gradient(135deg, #00aa44, #007730); color: #fff; box-shadow: 0 4px 20px rgba(0,170,68,0.4); }
+  #stop-btn   { background: linear-gradient(135deg, #cc2200, #991100); color: #fff; box-shadow: 0 4px 20px rgba(200,34,0,0.4); display:none; }
+  #split-btn  { background: linear-gradient(135deg, #0066cc, #004499); color: #fff; box-shadow: 0 4px 20px rgba(0,100,200,0.3); display:none; max-width: 80px; font-size: 0.85rem; flex: 0 0 80px; }
+  .timer-btn:active { transform: scale(0.93); }
+
+  .splits-section { width: 100%; max-width: 380px; margin-top: 16px; }
+  .splits-section h4 { font-size: 0.75rem; color: #4a7aaa; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+  #splits-list { list-style: none; max-height: 120px; overflow-y: auto; }
+  #splits-list li { padding: 4px 0; font-size: 0.9rem; color: #93c5fd; border-bottom: 1px solid #0d2040; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(-4px)} to{opacity:1;transform:none} }
+
+  /* ── Submit Overlay ── */
+  #submit-section {
+    display: none; position: fixed; inset: 0; background: rgba(0,5,15,0.92);
+    align-items: center; justify-content: center; z-index: 100;
+    animation: fadeIn 0.25s ease;
+  }
+  #submit-section.show-flex { display: flex; }
+  .submit-card {
+    background: #0d1b2e; border: 1px solid #1a3050; border-radius: 20px;
+    padding: 32px 28px; width: 90%; max-width: 360px; text-align: center;
+  }
+  .submit-card h2 { font-size: 1.2rem; color: #60a5fa; margin-bottom: 6px; }
+  .submit-swimmer { font-size: 1.3rem; font-weight: 700; color: #fff; margin-bottom: 4px; }
+  .submit-time {
+    font-size: 3rem; font-weight: 900; color: #4ade80;
+    font-family: 'Courier New', monospace; margin: 12px 0;
+    text-shadow: 0 0 20px rgba(74,222,128,0.5);
+  }
+  .submit-meta { font-size: 0.85rem; color: #4a7aaa; margin-bottom: 24px; }
+  .submit-btns { display: flex; gap: 12px; }
+  .btn-confirm {
+    flex: 1; padding: 16px; border-radius: 10px; border: none;
+    font-size: 1rem; font-weight: 700; cursor: pointer; transition: all 0.2s;
+  }
+  .btn-confirm.yes { background: linear-gradient(135deg, #00aa44, #007730); color: #fff; }
+  .btn-confirm.no  { background: #1a2540; color: #7090b0; }
+  .btn-confirm:active { transform: scale(0.95); }
+  .btn-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Toast ── */
+  #toast {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: #0d3320; border: 1px solid #2d8a50; color: #4ade80;
+    padding: 12px 24px; border-radius: 30px; font-weight: 600; font-size: 1rem;
+    opacity: 0; transition: all 0.3s; z-index: 200; white-space: nowrap;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ── Confetti ── */
+  .confetti-piece {
+    position: fixed; top: 0; border-radius: 2px; z-index: 300;
+    animation: confettiFall linear forwards;
+  }
+  @keyframes confettiFall {
+    0%   { transform: translateY(-10px) rotate(0deg); opacity: 1; }
+    100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+  }
+</style>
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div class="screen" id="login-screen">
+  <div class="login-logo">🏊</div>
+  <div class="login-title">SwimMeet Timer</div>
+  <div class="login-sub">Enter your info to start timing</div>
+  <div class="login-card">
+    <div class="field">
+      <label>Your Name</label>
+      <input type="text" id="login-name" placeholder="e.g. Coach Smith" autocomplete="off">
+    </div>
+    <div class="field">
+      <label>Your Lane</label>
+      <select id="login-lane">
+        <option value="">— Select Lane —</option>
+        <option value="1">Lane 1</option>
+        <option value="2">Lane 2</option>
+        <option value="3">Lane 3</option>
+        <option value="4">Lane 4</option>
+        <option value="5">Lane 5</option>
+        <option value="6">Lane 6</option>
+        <option value="7">Lane 7</option>
+        <option value="8">Lane 8</option>
+        <option value="9">Lane 9</option>
+        <option value="10">Lane 10</option>
+      </select>
+    </div>
+    <button class="btn-login" onclick="doLogin()">Enter Meet →</button>
+  </div>
+</div>
+
+<!-- MAIN TIMER SCREEN -->
+<div class="screen" id="main-screen">
+  <div class="top-bar">
+    <div class="logo-sm">🏊 SwimMeet</div>
+    <div style="display:flex;gap:8px;">
+      <span class="badge" id="event-badge">—</span>
+      <span class="badge" id="lane-badge">Lane —</span>
+    </div>
+  </div>
+
+  <div class="swimmer-card">
+    <div class="heat-row">
+      <span style="font-size:0.8rem;color:#4a7aaa;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;">Heat</span>
+      <select id="heat-select" onchange="onHeatChange()">
+        <option value="">— Select Heat —</option>
+      </select>
+    </div>
+    <div class="swimmer-name" id="swimmer-name">Waiting for event…</div>
+    <div class="swimmer-meta">
+      <span id="swimmer-team"></span>
+      <span id="swimmer-seed"></span>
+    </div>
+  </div>
+
+  <div class="timer-section">
+    <div class="timer-display" id="timer-display">0:00.00</div>
+
+    <div class="btn-row">
+      <button class="timer-btn" id="start-btn" onclick="startTimer()">▶ START</button>
+      <button class="timer-btn" id="stop-btn" onclick="stopTimer()">⏹ STOP</button>
+      <button class="timer-btn" id="split-btn" onclick="recordSplit()">✂ SPLIT</button>
+    </div>
+
+    <div class="splits-section">
+      <h4>Splits</h4>
+      <ul id="splits-list"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- SUBMIT OVERLAY -->
+<div id="submit-section">
+  <div class="submit-card">
+    <h2>Submit this time?</h2>
+    <div class="submit-swimmer" id="submit-swimmer-name"></div>
+    <div class="submit-time" id="final-time">0:00.00</div>
+    <div class="submit-meta" id="submit-meta"></div>
+    <div class="submit-btns">
+      <button class="btn-confirm no" onclick="cancelSubmit()">✕ Cancel</button>
+      <button class="btn-confirm yes" id="confirm-submit-btn" onclick="submitTime()">✓ Submit</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+  // Update submit card with swimmer info before showing
+  const origStop = window.stopTimer;
+  // patch submit section to populate swimmer info
+  document.addEventListener('DOMContentLoaded', () => {
+    const origSubmitSection = document.getElementById('submit-section');
+    // override showSubmit content
+  });
+</script>
+<script type="module">
+  // Patch stopTimer to fill swimmer name in submit overlay
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  // (State is already in the main module above — this script block just patches the overlay UI)
+  // We use a global event instead
+</script>
+<script>
+  // Intercept stop to fill overlay
+  const _origStop = window.stopTimer;
+  window.stopTimer = function() {
+    _origStop && _origStop();
+    // Fill submit card
+    const nameEl = document.getElementById('swimmer-name');
+    const subName = document.getElementById('submit-swimmer-name');
+    if (subName && nameEl) subName.textContent = nameEl.textContent;
+    const metaEl = document.getElementById('submit-meta');
+    const evBadge = document.getElementById('event-badge');
+    const ht = document.getElementById('heat-select');
+    const ln = document.getElementById('lane-badge');
+    if (metaEl) metaEl.textContent = (evBadge?.textContent||'') + ' · Heat ' + (ht?.value||'?') + ' · ' + (ln?.textContent||'');
+    // Show as flex
+    const sub = document.getElementById('submit-section');
+    if (sub) { sub.style.display = 'flex'; }
+    const btn = document.getElementById('confirm-submit-btn');
+    if (btn) { btn.disabled = false; btn.textContent = '✓ Submit'; }
+  };
+</script>
+
+</body>
+</html>

@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SwimMeet Live Results</title>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyB3llneR7FacPey8nUYj17zPhMnqmg7iIw",
+    authDomain: "sumtime-1931f.firebaseapp.com",
+    databaseURL: "https://sumtime-1931f-default-rtdb.firebaseio.com",
+    projectId: "sumtime-1931f",
+    storageBucket: "sumtime-1931f.firebasestorage.app",
+    messagingSenderId: "396135184476",
+    appId: "1:396135184476:web:adc8572d95792a5fe24e99"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  let heatSheet = null;
+  let results = null;
+  let activeEvent = null;
+  let lastResultCount = 0;
+  let rippleTimeout = null;
+
+  onValue(ref(db, 'heatSheet'), snap => { heatSheet = snap.val(); render(); });
+  onValue(ref(db, 'activeEvent'), snap => { activeEvent = snap.val(); render(); });
+  onValue(ref(db, 'results'), snap => {
+    const newData = snap.val();
+    // detect new result
+    let count = 0;
+    if (newData) for (const ev in newData) for (const ht in newData[ev]) for (const ln in newData[ev][ht]) count++;
+    if (count > lastResultCount) triggerNewResultEffect();
+    lastResultCount = count;
+    results = newData;
+    render();
+  });
+
+  function triggerNewResultEffect() {
+    const overlay = document.getElementById('new-result-overlay');
+    overlay.classList.add('show');
+    clearTimeout(rippleTimeout);
+    rippleTimeout = setTimeout(() => overlay.classList.remove('show'), 1200);
+  }
+
+  function render() {
+    if (!activeEvent) {
+      showWaiting();
+      return;
+    }
+    document.getElementById('waiting').style.display = 'none';
+    document.getElementById('main-display').style.display = 'flex';
+
+    document.getElementById('event-title').textContent = 'Event ' + activeEvent;
+
+    // Build leaderboard for active event
+    const eventResults = results?.[activeEvent] || {};
+    const allTimes = [];
+
+    // Gather all submitted times across all heats
+    for (const heat in eventResults) {
+      for (const lane in eventResults[heat]) {
+        const entry = eventResults[heat][lane];
+        allTimes.push({ ...entry, heat, lane });
+      }
+    }
+
+    // Sort by time ascending
+    allTimes.sort((a, b) => a.time - b.time);
+
+    // Find heat winners
+    const heatWinners = {};
+    for (const heat in eventResults) {
+      let best = null;
+      for (const lane in eventResults[heat]) {
+        const e = eventResults[heat][lane];
+        if (!best || e.time < best.time) best = { ...e, heat, lane };
+      }
+      if (best) heatWinners[heat] = best.lane;
+    }
+
+    renderLeaderboard(allTimes, heatWinners);
+    renderHeatSummary(heatWinners);
+    updateClock();
+  }
+
+  function renderLeaderboard(times, heatWinners) {
+    const tbody = document.getElementById('leaderboard-body');
+    if (times.length === 0) {
+      tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Waiting for results…</td></tr>`;
+      return;
+    }
+
+    const limit = 10;
+    tbody.innerHTML = times.slice(0, limit).map((t, i) => {
+      const isFirst = i === 0;
+      const isHeatWinner = heatWinners[t.heat] === t.lane;
+      const rank = i + 1;
+      const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : rank;
+      const rowClass = isFirst ? 'rank-1' : isHeatWinner ? 'heat-winner' : '';
+
+      return `<tr class="${rowClass}" data-heat="${t.heat}" data-lane="${t.lane}">
+        <td class="rank-cell">${medal}</td>
+        <td class="name-cell">
+          <span class="swimmer-name-tv">${t.swimmer}</span>
+          ${t.team ? `<span class="team-name">${t.team}</span>` : ''}
+        </td>
+        <td class="team-cell">${t.team || ''}</td>
+        <td class="time-cell">${t.timeFormatted}</td>
+        <td class="heat-cell">
+          Heat ${t.heat}
+          ${isHeatWinner ? '<span class="heat-win-badge">HEAT WIN</span>' : ''}
+        </td>
+      </tr>`;
+    }).join('');
+
+    // Animate new rows in
+    tbody.querySelectorAll('tr').forEach((row, i) => {
+      row.style.animationDelay = `${i * 0.05}s`;
+      row.classList.add('row-in');
+    });
+  }
+
+  function renderHeatSummary(heatWinners) {
+    if (!heatSheet || !activeEvent) return;
+    const heats = heatSheet[activeEvent]?.heats || {};
+    const heatNums = Object.keys(heats).sort((a,b) => Number(a)-Number(b));
+    const eventResults = results?.[activeEvent] || {};
+
+    const container = document.getElementById('heat-summary');
+    container.innerHTML = heatNums.map(h => {
+      const submitted = Object.keys(eventResults[h] || {}).length;
+      const total = Object.keys(heats[h]?.lanes || {}).length;
+      const done = submitted >= total && total > 0;
+      const winnerLane = heatWinners[h];
+      const winnerEntry = winnerLane && eventResults[h]?.[winnerLane];
+
+      return `<div class="heat-pill ${done ? 'heat-done' : submitted > 0 ? 'heat-partial' : 'heat-waiting'}">
+        <div class="heat-pill-label">Heat ${h}</div>
+        <div class="heat-pill-status">${submitted}/${total} lanes</div>
+        ${winnerEntry ? `<div class="heat-pill-winner">🏆 ${winnerEntry.swimmer.split(' ')[0]} ${winnerEntry.timeFormatted}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  function showWaiting() {
+    document.getElementById('waiting').style.display = 'flex';
+    document.getElementById('main-display').style.display = 'none';
+  }
+
+  let clockInterval = null;
+  function updateClock() {
+    const el = document.getElementById('clock');
+    clearInterval(clockInterval);
+    clockInterval = setInterval(() => {
+      const now = new Date();
+      el.textContent = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }, 1000);
+  }
+
+  // Water ripple animation
+  setInterval(() => {
+    const bars = document.querySelectorAll('.wave-bar');
+    bars.forEach((b, i) => {
+      b.style.animationDelay = `${i * 0.1}s`;
+    });
+  }, 5000);
+</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Roboto+Mono:wght@400;700&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Barlow Condensed', 'Segoe UI', Arial, sans-serif;
+    background: #020810;
+    color: #e0e8ff;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Animated background ── */
+  .bg-gradient {
+    position: fixed; inset: 0; z-index: 0;
+    background: radial-gradient(ellipse at 20% 50%, #001840 0%, transparent 60%),
+                radial-gradient(ellipse at 80% 20%, #001028 0%, transparent 50%),
+                #020810;
+  }
+  .lane-lines {
+    position: fixed; inset: 0; z-index: 0; overflow: hidden; opacity: 0.06;
+  }
+  .lane-line {
+    position: absolute; top: 0; bottom: 0; width: 1px; background: linear-gradient(to bottom, transparent, #0088ff, transparent);
+  }
+
+  /* ── New result flash ── */
+  #new-result-overlay {
+    position: fixed; inset: 0; z-index: 50; pointer-events: none;
+    border: 4px solid transparent; border-radius: 0;
+    transition: none; opacity: 0;
+  }
+  #new-result-overlay.show {
+    animation: resultFlash 1.2s ease forwards;
+  }
+  @keyframes resultFlash {
+    0%  { opacity: 0; box-shadow: inset 0 0 0 rgba(0,136,255,0); border-color: transparent; }
+    20% { opacity: 1; box-shadow: inset 0 0 60px rgba(0,136,255,0.3); border-color: #0088ff; }
+    100%{ opacity: 0; box-shadow: inset 0 0 0 rgba(0,136,255,0); border-color: transparent; }
+  }
+
+  /* ── Layout ── */
+  #waiting {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100vh; position: relative; z-index: 1;
+  }
+  .waiting-logo { font-size: 8rem; animation: float 3s ease-in-out infinite; }
+  @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-12px)} }
+  .waiting-title { font-size: 4rem; font-weight: 900; color: #fff; margin-top: 16px; text-transform: uppercase; letter-spacing: 0.1em; }
+  .waiting-sub { font-size: 1.4rem; color: #4a7aaa; margin-top: 8px; }
+
+  /* Wave animation */
+  .wave-container { display: flex; align-items: flex-end; gap: 4px; margin-top: 48px; height: 60px; }
+  .wave-bar {
+    width: 8px; background: linear-gradient(to top, #0044cc, #00aaff);
+    border-radius: 4px 4px 0 0;
+    animation: wave 1.5s ease-in-out infinite;
+  }
+  @keyframes wave {
+    0%,100% { height: 10px; opacity: 0.4; }
+    50% { height: 55px; opacity: 1; }
+  }
+
+  #main-display {
+    display: none; flex-direction: column; min-height: 100vh;
+    position: relative; z-index: 1;
+  }
+
+  /* ── Header ── */
+  .tv-header {
+    background: linear-gradient(135deg, #001840 0%, #000d26 100%);
+    border-bottom: 3px solid #0066cc;
+    padding: 16px 40px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .header-left { display: flex; align-items: center; gap: 20px; }
+  .header-logo { font-size: 2.4rem; }
+  .header-title { font-size: 1.1rem; font-weight: 600; color: #4a7aaa; text-transform: uppercase; letter-spacing: 0.1em; }
+  .event-number {
+    font-size: 3rem; font-weight: 900; color: #fff;
+    text-transform: uppercase; letter-spacing: 0.05em; line-height: 1;
+  }
+  .header-right { text-align: right; }
+  .clock { font-family: 'Roboto Mono', monospace; font-size: 1.8rem; color: #60a5fa; font-weight: 700; }
+  .live-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #cc0000; padding: 4px 12px; border-radius: 4px;
+    font-size: 0.85rem; font-weight: 700; color: #fff; text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 4px;
+  }
+  .live-dot { width: 8px; height: 8px; background: #fff; border-radius: 50%; animation: blink 1s step-end infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  /* ── Body ── */
+  .tv-body { flex: 1; display: flex; gap: 0; }
+
+  /* ── Leaderboard ── */
+  .leaderboard-section { flex: 1; padding: 24px 32px; }
+  .section-title {
+    font-size: 1rem; font-weight: 700; color: #0088ff;
+    text-transform: uppercase; letter-spacing: 0.15em;
+    margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-title::after { content: ''; flex: 1; height: 1px; background: #0d2850; }
+
+  .leaderboard-table { width: 100%; border-collapse: separate; border-spacing: 0 6px; }
+  .leaderboard-table thead tr { }
+  .leaderboard-table th {
+    font-size: 0.8rem; font-weight: 700; color: #4a7aaa; text-transform: uppercase;
+    letter-spacing: 0.1em; padding: 0 16px 8px; text-align: left;
+  }
+  .leaderboard-table th:last-child { text-align: right; }
+
+  .leaderboard-table tbody tr {
+    background: #0a1628; border-radius: 10px;
+    transition: transform 0.2s;
+  }
+  .leaderboard-table tbody tr td:first-child { border-radius: 10px 0 0 10px; }
+  .leaderboard-table tbody tr td:last-child  { border-radius: 0 10px 10px 0; }
+
+  @keyframes rowIn { from{opacity:0;transform:translateX(-20px)} to{opacity:1;transform:none} }
+  .row-in { animation: rowIn 0.4s ease forwards; }
+
+  td { padding: 14px 16px; vertical-align: middle; }
+
+  .rank-cell { font-size: 1.6rem; font-weight: 900; width: 60px; text-align: center; }
+  .name-cell { }
+  .swimmer-name-tv { font-size: 1.5rem; font-weight: 800; color: #fff; display: block; }
+  .team-name { font-size: 0.9rem; color: #4a7aaa; display: block; margin-top: 1px; }
+  .team-cell { display: none; }
+  .time-cell {
+    font-family: 'Roboto Mono', monospace; font-size: 2rem; font-weight: 700;
+    color: #60a5fa; text-align: right; white-space: nowrap;
+  }
+  .heat-cell { font-size: 0.9rem; color: #4a7aaa; text-align: right; white-space: nowrap; }
+  .heat-win-badge {
+    display: inline-block; background: #0d3320; border: 1px solid #2d8a50;
+    color: #4ade80; font-size: 0.7rem; font-weight: 700; padding: 2px 8px;
+    border-radius: 4px; margin-left: 8px; text-transform: uppercase; letter-spacing: 0.08em;
+  }
+
+  /* ── Rank 1 row ── */
+  .rank-1 {
+    background: linear-gradient(135deg, #0d2850, #0a1e3d) !important;
+    border: 1px solid #0055cc;
+    box-shadow: 0 0 20px rgba(0,85,204,0.3);
+  }
+  .rank-1 .swimmer-name-tv { color: #ffd700; font-size: 1.7rem; }
+  .rank-1 .time-cell { color: #ffd700; font-size: 2.2rem; }
+
+  /* ── Heat winner row ── */
+  .heat-winner {
+    background: linear-gradient(135deg, #0d2820, #0a1e18) !important;
+    border: 1px solid #1a6640;
+  }
+  .heat-winner .swimmer-name-tv { color: #4ade80; }
+  .heat-winner .time-cell { color: #4ade80; }
+
+  /* ── Empty row ── */
+  .empty-row td {
+    text-align: center; color: #2d4a7a; font-size: 1.2rem;
+    padding: 48px; font-style: italic;
+  }
+
+  /* ── Right panel: Heat summary ── */
+  .heats-panel {
+    width: 280px; background: #060e1c; border-left: 1px solid #0d2040;
+    padding: 24px 20px;
+  }
+  #heat-summary { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+  .heat-pill {
+    border-radius: 10px; padding: 12px 14px;
+    border: 1px solid #0d2040; transition: all 0.3s;
+  }
+  .heat-waiting  { background: #0a1220; border-color: #0d2040; }
+  .heat-partial  { background: #0a1828; border-color: #1a4060; }
+  .heat-done     { background: #0a1e18; border-color: #1a5030; }
+
+  .heat-pill-label { font-size: 1rem; font-weight: 700; color: #60a5fa; }
+  .heat-pill-status { font-size: 0.8rem; color: #4a7aaa; margin-top: 2px; }
+  .heat-pill-winner { font-size: 0.85rem; color: #4ade80; margin-top: 6px; font-weight: 600; }
+
+  /* ── Footer ── */
+  .tv-footer {
+    background: #000d1a; border-top: 1px solid #0d2040;
+    padding: 10px 40px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .footer-brand { font-size: 0.85rem; color: #1e3a5f; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; }
+  .ticker { font-size: 0.8rem; color: #1e3a5f; }
+</style>
+</head>
+<body>
+<div class="bg-gradient"></div>
+<div class="lane-lines" id="lane-lines"></div>
+<div id="new-result-overlay"></div>
+
+<!-- WAITING SCREEN -->
+<div id="waiting">
+  <div class="waiting-logo">🏊</div>
+  <div class="waiting-title">SwimMeet Live</div>
+  <div class="waiting-sub">Waiting for meet to begin…</div>
+  <div class="wave-container">
+    <div class="wave-bar" style="animation-delay:0s"></div>
+    <div class="wave-bar" style="animation-delay:0.1s"></div>
+    <div class="wave-bar" style="animation-delay:0.2s"></div>
+    <div class="wave-bar" style="animation-delay:0.3s"></div>
+    <div class="wave-bar" style="animation-delay:0.4s"></div>
+    <div class="wave-bar" style="animation-delay:0.5s"></div>
+    <div class="wave-bar" style="animation-delay:0.6s"></div>
+    <div class="wave-bar" style="animation-delay:0.7s"></div>
+    <div class="wave-bar" style="animation-delay:0.8s"></div>
+    <div class="wave-bar" style="animation-delay:0.9s"></div>
+    <div class="wave-bar" style="animation-delay:1.0s"></div>
+    <div class="wave-bar" style="animation-delay:1.1s"></div>
+  </div>
+</div>
+
+<!-- MAIN DISPLAY -->
+<div id="main-display">
+  <div class="tv-header">
+    <div class="header-left">
+      <div class="header-logo">🏊</div>
+      <div>
+        <div class="header-title">SwimMeet Live Results</div>
+        <div class="event-number" id="event-title">Event —</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div><span class="live-badge"><span class="live-dot"></span>LIVE</span></div>
+      <div class="clock" id="clock">--:--:--</div>
+    </div>
+  </div>
+
+  <div class="tv-body">
+    <div class="leaderboard-section">
+      <div class="section-title">🏆 Leaderboard</div>
+      <table class="leaderboard-table">
+        <thead>
+          <tr>
+            <th style="width:60px;">Rank</th>
+            <th>Swimmer</th>
+            <th style="text-align:right;">Time</th>
+            <th style="text-align:right;">Heat</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-body">
+          <tr class="empty-row"><td colspan="4">Waiting for results…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="heats-panel">
+      <div class="section-title" style="font-size:0.85rem;">Heats</div>
+      <div id="heat-summary"></div>
+    </div>
+  </div>
+
+  <div class="tv-footer">
+    <div class="footer-brand">🏊 SwimMeet Live</div>
+    <div class="ticker" id="ticker">Results update automatically</div>
+  </div>
+</div>
+
+<script>
+  // Generate lane lines
+  const ll = document.getElementById('lane-lines');
+  for (let i = 0; i < 12; i++) {
+    const d = document.createElement('div');
+    d.className = 'lane-line';
+    d.style.left = (i * 9) + '%';
+    ll.appendChild(d);
+  }
+</script>
+</body>
+</html>

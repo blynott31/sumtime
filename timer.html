@@ -441,6 +441,28 @@
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') acquireWakeLock();
     });
+
+    // iOS workaround: play a silent audio loop to prevent screen lock.
+    // iOS will not lock the screen while audio is actively playing.
+    // We use a programmatically generated silent audio buffer so no audio file is needed.
+    function startSilentAudio() {
+      try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        const buffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate); // 1 second silent buffer
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.loop = true;
+        source.connect(ctx.destination);
+        source.start(0);
+        // iOS suspends AudioContext until a user gesture — resume on first touch
+        document.addEventListener('touchstart', () => {
+          if (ctx.state === 'suspended') ctx.resume();
+        }, { once: true });
+      } catch(e) { /* silently ignore if not supported */ }
+    }
+    startSilentAudio();
   });
 </script>
 <style>

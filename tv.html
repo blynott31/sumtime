@@ -144,7 +144,7 @@
           ${t.team ? `<span class="team-name">${t.team}</span>` : ''}
         </td>
         <td class="team-cell">${t.team || ''}</td>
-        <td class="time-cell">${isDQ ? '<span class="dq-label-tv">DISQUALIFIED</span>' : t.timeFormatted}</td>
+        <td class="time-cell">${isDQ ? '' : t.timeFormatted}</td>
         <td class="heat-cell">
           Heat ${t.heat}
           ${!isDQ && t.averaged ? `<span class="avg-badge" title="${t.individualTimes || ''}">AVG ×${t.timerCount||2}</span>` : ''}
